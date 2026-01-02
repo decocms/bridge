@@ -4,10 +4,7 @@
   "version": "1.0.0",
   "description": "Universal browser bridge for MCP Mesh - control any website through AI",
   "permissions": ["activeTab", "storage"],
-  "host_permissions": [
-    "https://web.whatsapp.com/*",
-    "https://*.whatsapp.com/*"
-  ],
+  "host_permissions": ["https://web.whatsapp.com/*", "https://*.whatsapp.com/*"],
   "background": {
     "service_worker": "background.js"
   },

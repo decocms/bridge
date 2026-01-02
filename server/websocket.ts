@@ -15,16 +15,8 @@ import {
   parseFrame,
   stringifyFrame,
 } from "./core/protocol.ts";
-import {
-  getMeshClient,
-  checkMeshAvailability,
-} from "./core/mesh-client.ts";
-import {
-  type DomainContext,
-  getDomain,
-  getAllDomains,
-  findDomainForUrl,
-} from "./core/domain.ts";
+import { getMeshClient, checkMeshAvailability } from "./core/mesh-client.ts";
+import { type DomainContext, getDomain, getAllDomains, findDomainForUrl } from "./core/domain.ts";
 
 const BRIDGE_VERSION = "0.1.0";
 
@@ -33,7 +25,6 @@ const sessions = new Map<WebSocket, Session>();
 let meshStatus: {
   available: boolean;
   hasLLM: boolean;
-  hasPerplexity: boolean;
   tools: string[];
 } | null = null;
 
@@ -69,6 +60,8 @@ function createDomainContext(ws: WebSocket, session: Session): DomainContext {
     config: {
       aiPrefix: config.aiPrefix,
       defaultModel: config.mesh.defaultModel,
+      fastModel: config.mesh.fastModel,
+      smartModel: config.mesh.smartModel,
     },
   };
 }
@@ -128,7 +121,7 @@ async function handleConnect(
       meshStatus = await checkMeshAvailability();
     } catch {
       // This is expected on first connection before ON_MCP_CONFIGURATION is called
-      meshStatus = { available: false, hasLLM: false, hasPerplexity: false, tools: [] };
+      meshStatus = { available: false, hasLLM: false, tools: [] };
     }
   }
 
@@ -152,10 +145,7 @@ async function handleConnect(
   console.error(`[mesh-bridge] Session started: ${session.id} (${domainId})`);
 }
 
-async function handlePing(
-  ws: WebSocket,
-  frame: ClientFrame & { type: "ping" },
-): Promise<void> {
+async function handlePing(ws: WebSocket, frame: ClientFrame & { type: "ping" }): Promise<void> {
   const session = getSession(ws);
   if (session) {
     session.lastActivity = new Date();
@@ -194,10 +184,7 @@ async function handleCommand(
 
   if (domain.handleCommand) {
     const ctx = createDomainContext(ws, session);
-    await domain.handleCommand(
-      { id: frame.id, command: frame.command, args: frame.args },
-      ctx,
-    );
+    await domain.handleCommand({ id: frame.id, command: frame.command, args: frame.args }, ctx);
   } else {
     send(ws, {
       type: "error",
@@ -307,10 +294,7 @@ async function handleToolCall(
   }
 }
 
-async function handleEvent(
-  ws: WebSocket,
-  frame: ClientFrame & { type: "event" },
-): Promise<void> {
+async function handleEvent(ws: WebSocket, frame: ClientFrame & { type: "event" }): Promise<void> {
   const session = getSession(ws);
   if (!session) return;
 
@@ -359,7 +343,12 @@ export function startWebSocketServer(port: number): ReturnType<typeof Bun.serve>
         message(ws, data) {
           const frame = parseFrame(String(data));
           if (!frame) {
-            send(ws, { type: "error", id: "parse", code: "INVALID_FRAME", message: "Invalid JSON" });
+            send(ws, {
+              type: "error",
+              id: "parse",
+              code: "INVALID_FRAME",
+              message: "Invalid JSON",
+            });
             return;
           }
 
@@ -384,7 +373,12 @@ export function startWebSocketServer(port: number): ReturnType<typeof Bun.serve>
               handleEvent(ws, frame).catch(console.error);
               break;
             default:
-              send(ws, { type: "error", id: "unknown", code: "UNKNOWN_FRAME", message: "Unknown frame type" });
+              send(ws, {
+                type: "error",
+                id: "unknown",
+                code: "UNKNOWN_FRAME",
+                message: "Unknown frame type",
+              });
           }
         },
         close(ws) {
@@ -417,4 +411,3 @@ export function startWebSocketServer(port: number): ReturnType<typeof Bun.serve>
 }
 
 export { sessions, meshStatus };
-

@@ -33,6 +33,12 @@ export interface ToolResult {
   isError?: boolean;
 }
 
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
 /**
  * Binding value from Mesh UI
  */
@@ -85,24 +91,65 @@ function getAuthToken(): string | undefined {
 }
 
 /**
- * Get the LLM binding connection ID from state
+ * Check if mesh is ready (has received configuration from mesh)
  */
-export function getLLMConnectionId(): string | undefined {
+export function isMeshReady(): boolean {
+  return meshRequestContext !== null && !!meshRequestContext.authorization;
+}
+
+/**
+ * Get a binding connection ID from state by name
+ */
+function getBindingConnectionId(bindingName: string): string | undefined {
   if (!meshRequestContext) {
-    console.error("[getLLMConnectionId] meshRequestContext is null - ON_MCP_CONFIGURATION not called yet");
+    console.error(
+      `[getBindingConnectionId:${bindingName}] meshRequestContext is null - ON_MCP_CONFIGURATION not called yet`,
+    );
     return undefined;
   }
   if (!meshRequestContext.state) {
-    console.error("[getLLMConnectionId] meshRequestContext.state is undefined");
+    console.error(`[getBindingConnectionId:${bindingName}] meshRequestContext.state is undefined`);
     return undefined;
   }
-  const llmBinding = meshRequestContext.state.LLM as BindingValue | undefined;
-  if (!llmBinding) {
-    console.error("[getLLMConnectionId] LLM binding not in state. Available keys:", Object.keys(meshRequestContext.state));
+  const binding = meshRequestContext.state[bindingName] as BindingValue | undefined;
+  if (!binding) {
+    console.error(
+      `[getBindingConnectionId:${bindingName}] Binding not in state. Available keys:`,
+      Object.keys(meshRequestContext.state),
+    );
     return undefined;
   }
-  console.error("[getLLMConnectionId] Found LLM binding:", llmBinding.value);
-  return llmBinding.value;
+  console.error(`[getBindingConnectionId:${bindingName}] Found binding:`, binding.value);
+  return binding.value;
+}
+
+/**
+ * Get the LLM binding connection ID from state
+ */
+export function getLLMConnectionId(): string | undefined {
+  return getBindingConnectionId("LLM");
+}
+
+/**
+ * Get the CONNECTION binding connection ID from state
+ * This is the mesh's connection management binding
+ */
+export function getConnectionBindingId(): string | undefined {
+  return getBindingConnectionId("CONNECTION");
+}
+
+/**
+ * Get the DATABASE binding connection ID from state
+ */
+export function getDatabaseBindingId(): string | undefined {
+  return getBindingConnectionId("DATABASE");
+}
+
+/**
+ * Get the EVENT_BUS binding connection ID from state
+ */
+export function getEventBusBindingId(): string | undefined {
+  return getBindingConnectionId("EVENT_BUS");
 }
 
 /**
@@ -118,13 +165,13 @@ export async function callMeshTool<T = unknown>(
   const meshUrl = getMeshUrl();
 
   if (!token) {
-    throw new Error(
-      "Mesh not configured. Configure bindings in Mesh UI first.",
-    );
+    throw new Error("Mesh not configured. Configure bindings in Mesh UI first.");
   }
 
   const endpoint = `${meshUrl}/mcp/${connectionId}`;
-  console.error(`[callMeshTool] Calling ${endpoint} with tool: ${toolName}`);
+  console.error(`\n[callMeshTool] ──────────────────────────────────────`);
+  console.error(`[callMeshTool] → ${toolName} @ ${connectionId}`);
+  console.error(`[callMeshTool] Args: ${JSON.stringify(args, null, 2)}`);
 
   const response = await fetch(endpoint, {
     method: "POST",
@@ -147,20 +194,22 @@ export async function callMeshTool<T = unknown>(
   if (!response.ok) {
     const text = await response.text();
     console.error(`[callMeshTool] Error response (${response.status}): ${text}`);
-    
+
     if (response.status === 401) {
-      console.error(`[callMeshTool] ⚠️ TOKEN EXPIRED - Mesh should send ON_MCP_CONFIGURATION with fresh token`);
+      console.error(
+        `[callMeshTool] ⚠️ TOKEN EXPIRED - Mesh should send ON_MCP_CONFIGURATION with fresh token`,
+      );
       console.error(`[callMeshTool] This usually means the mesh connection needs to be restarted.`);
       throw new Error(`Token expired (401). Restart mesh connection to get fresh credentials.`);
     }
-    
+
     throw new Error(`Mesh API error (${response.status}): ${text}`);
   }
 
   // Handle both JSON and SSE responses
   const contentType = response.headers.get("Content-Type") || "";
   console.error(`[callMeshTool] Response Content-Type: ${contentType}`);
-  
+
   let json: {
     result?: { structuredContent?: T; content?: { text: string }[] };
     error?: { message: string };
@@ -303,7 +352,10 @@ export class MeshClient {
   async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     await this.initialize();
 
-    const response = await fetch(this.getMcpUrl(), {
+    const url = this.getMcpUrl();
+    console.error(`[MeshClient] callTool ${name} -> ${url}`);
+
+    const response = await fetch(url, {
       method: "POST",
       headers: this.getHeaders(),
       body: JSON.stringify({
@@ -319,10 +371,18 @@ export class MeshClient {
 
     if (!response.ok) {
       const error = await response.text();
+      console.error(
+        `[MeshClient] callTool ${name} failed: ${response.status}`,
+        error.slice(0, 200),
+      );
       throw new Error(`Mesh call failed: ${response.status} ${error}`);
     }
 
     const result = await response.json();
+    console.error(
+      `[MeshClient] callTool ${name} raw result:`,
+      JSON.stringify(result).slice(0, 300),
+    );
 
     if (result.error) {
       throw new Error(`Tool error: ${result.error.message}`);
@@ -332,10 +392,12 @@ export class MeshClient {
     const content = result.result;
 
     if (content?.structuredContent) {
+      console.error(`[MeshClient] callTool ${name} -> structuredContent`);
       return content.structuredContent;
     }
 
     if (content?.content?.[0]?.text) {
+      console.error(`[MeshClient] callTool ${name} -> content[0].text`);
       try {
         return JSON.parse(content.content[0].text);
       } catch {
@@ -343,15 +405,63 @@ export class MeshClient {
       }
     }
 
+    console.error(`[MeshClient] callTool ${name} -> raw content`);
     return content;
   }
 
   /**
-   * List available tools on the mesh
+   * List available tools from all connections in the mesh.
+   * Uses the CONNECTION binding's COLLECTION_CONNECTIONS_LIST tool.
    */
-  async listTools(): Promise<Array<{ name: string; description?: string }>> {
+  async listTools(): Promise<
+    Array<{ name: string; description?: string; connectionId?: string; connectionTitle?: string }>
+  > {
     await this.initialize();
 
+    // Use the CONNECTION binding to list all connections with their tools
+    const connectionBindingId = getConnectionBindingId();
+
+    if (connectionBindingId) {
+      try {
+        console.error("[MeshClient] Listing tools via CONNECTION binding...");
+        const result = await callMeshTool<{
+          items?: Array<{
+            id: string;
+            title: string;
+            tools?: Array<{ name: string; description?: string }>;
+          }>;
+        }>(connectionBindingId, "COLLECTION_CONNECTIONS_LIST", {});
+
+        const allTools: Array<{
+          name: string;
+          description?: string;
+          connectionId?: string;
+          connectionTitle?: string;
+        }> = [];
+
+        for (const conn of result?.items || []) {
+          for (const tool of conn.tools || []) {
+            allTools.push({
+              name: tool.name,
+              description: tool.description,
+              connectionId: conn.id,
+              connectionTitle: conn.title,
+            });
+          }
+        }
+
+        console.error(
+          `[MeshClient] Found ${allTools.length} tools from ${result?.items?.length || 0} connections`,
+        );
+        return allTools;
+      } catch (error) {
+        console.error("[MeshClient] Failed to list via CONNECTION binding:", error);
+        // Fall through to legacy method
+      }
+    }
+
+    // Legacy fallback: call /mcp tools/list directly
+    console.error("[MeshClient] Falling back to direct /mcp tools/list...");
     const response = await fetch(this.getMcpUrl(), {
       method: "POST",
       headers: this.getHeaders(),
@@ -372,6 +482,48 @@ export class MeshClient {
   }
 
   /**
+   * List all connections in the mesh
+   */
+  async listConnections(): Promise<Array<{ id: string; title: string; toolCount: number }>> {
+    const connectionBindingId = getConnectionBindingId();
+
+    if (!connectionBindingId) {
+      console.error("[MeshClient] CONNECTION binding not configured");
+      return [];
+    }
+
+    try {
+      const result = await callMeshTool<{
+        items?: Array<{
+          id: string;
+          title: string;
+          tools?: Array<{ name: string }>;
+        }>;
+      }>(connectionBindingId, "COLLECTION_CONNECTIONS_LIST", {});
+
+      return (result?.items || []).map((conn) => ({
+        id: conn.id,
+        title: conn.title,
+        toolCount: conn.tools?.length || 0,
+      }));
+    } catch (error) {
+      console.error("[MeshClient] Failed to list connections:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Call a tool on a specific connection
+   */
+  async callConnectionTool(
+    connectionId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    return callMeshTool(connectionId, toolName, args);
+  }
+
+  /**
    * Call LLM_DO_GENERATE to generate a response using the mesh's LLM binding.
    * Routes through the bound LLM connection (e.g., OpenRouter).
    */
@@ -383,9 +535,7 @@ export class MeshClient {
     // Get the LLM connection ID from bindings
     const llmConnectionId = getLLMConnectionId();
     if (!llmConnectionId) {
-      throw new Error(
-        "LLM binding not configured. Configure the LLM binding in Mesh UI first.",
-      );
+      throw new Error("LLM binding not configured. Configure the LLM binding in Mesh UI first.");
     }
 
     console.error(`[MeshClient] Using LLM connection: ${llmConnectionId}`);
@@ -448,6 +598,213 @@ export class MeshClient {
   }
 
   /**
+   * Generate with tool calling support.
+   * The LLM can call tools and we execute them, returning results.
+   */
+  async generateWithTools(
+    modelId: string,
+    messages: Message[],
+    tools: ToolDefinition[],
+    executeToolFn: (name: string, args: Record<string, unknown>) => Promise<unknown>,
+    options: { maxTokens?: number; temperature?: number; maxIterations?: number } = {},
+  ): Promise<string> {
+    const llmConnectionId = getLLMConnectionId();
+    if (!llmConnectionId) {
+      throw new Error("LLM binding not configured");
+    }
+
+    const maxIterations = options.maxIterations ?? 5;
+    let currentMessages = [...messages];
+
+    for (let i = 0; i < maxIterations; i++) {
+      console.error(`[MeshClient] Tool loop iteration ${i + 1}/${maxIterations}`);
+
+      // Convert messages to LLM format
+      const prompt = currentMessages.map((m) => {
+        if (m.role === "system") {
+          return { role: "system", content: m.content };
+        }
+        return {
+          role: m.role,
+          content: [{ type: "text", text: m.content }],
+        };
+      });
+
+      // Convert tools to AI SDK format
+      // See: https://sdk.vercel.ai/docs/ai-sdk-core/tools-and-tool-calling
+      const toolsForLLM = tools.map((t) => ({
+        type: "function" as const,
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      }));
+
+      const callOptions = {
+        prompt,
+        tools: toolsForLLM,
+        toolChoice: { type: "auto" as const }, // AI SDK expects { type: "auto" }, not just "auto"
+        ...(options.maxTokens && { maxOutputTokens: options.maxTokens }),
+        ...(options.temperature && { temperature: options.temperature }),
+      };
+
+      console.error(
+        `[MeshClient] Sending ${toolsForLLM.length} tools with toolChoice: { type: "auto" }`,
+      );
+
+      try {
+        console.error(`[MeshClient] Calling LLM with ${toolsForLLM.length} tools available`);
+        const result = await callMeshTool<{
+          content?: Array<{
+            type: string;
+            text?: string;
+            // AI SDK format for tool calls
+            toolCallId?: string;
+            toolName?: string;
+            args?: Record<string, unknown>;
+            // Some providers return `input` as JSON string instead of `args`
+            input?: string | Record<string, unknown>;
+          }>;
+          text?: string;
+          toolCalls?: Array<{
+            id: string;
+            type: "function";
+            function: { name: string; arguments: string };
+          }>;
+          finishReason?: string;
+        }>(llmConnectionId, "LLM_DO_GENERATE", { modelId, callOptions });
+
+        console.error(`[MeshClient] LLM result:`, JSON.stringify(result).slice(0, 800));
+        console.error(`[MeshClient] finishReason:`, result?.finishReason);
+
+        // Extract tool calls from content array (AI SDK format)
+        const toolCallsFromContent = result?.content?.filter((c) => c.type === "tool-call") || [];
+        console.error(`[MeshClient] Tool calls in content:`, toolCallsFromContent.length);
+
+        // Also check legacy toolCalls field
+        const legacyToolCalls = result?.toolCalls || [];
+        console.error(`[MeshClient] Legacy toolCalls:`, legacyToolCalls.length);
+
+        // Combine both sources
+        // Note: AI SDK returns `input` as a JSON string, not `args` as object
+        const allToolCalls = [
+          ...toolCallsFromContent.map((tc) => {
+            // Handle both `args` (object) and `input` (JSON string) formats
+            let parsedArgs: Record<string, unknown> = {};
+            if (tc.args && typeof tc.args === "object") {
+              parsedArgs = tc.args;
+            } else if ((tc as any).input) {
+              // AI SDK sometimes returns `input` as a JSON string
+              const inputField = (tc as any).input;
+              if (typeof inputField === "string") {
+                try {
+                  parsedArgs = JSON.parse(inputField);
+                } catch (e) {
+                  console.error(
+                    `[MeshClient] Failed to parse tool input JSON:`,
+                    inputField.slice(0, 100),
+                  );
+                }
+              } else if (typeof inputField === "object") {
+                parsedArgs = inputField;
+              }
+            }
+            console.error(
+              `[MeshClient] Parsed tool call: ${tc.toolName} with args:`,
+              JSON.stringify(parsedArgs).slice(0, 200),
+            );
+            return {
+              name: tc.toolName!,
+              arguments: parsedArgs,
+            };
+          }),
+          ...legacyToolCalls.map((tc) => ({
+            name: tc.function.name,
+            arguments: JSON.parse(tc.function.arguments || "{}"),
+          })),
+        ];
+
+        // Check for tool calls
+        if (allToolCalls.length > 0) {
+          console.error(
+            `[MeshClient] LLM wants to call ${allToolCalls.length} tool(s):`,
+            allToolCalls.map((t) => t.name),
+          );
+
+          // Extract any text response first
+          let assistantText = "";
+          if (result?.content) {
+            const textPart = result.content.find((c) => c.type === "text");
+            if (textPart?.text) assistantText = textPart.text;
+          }
+
+          // Add assistant message with tool calls
+          if (assistantText) {
+            currentMessages.push({ role: "assistant", content: assistantText });
+          }
+
+          // Execute each tool call
+          for (const tc of allToolCalls) {
+            const toolName = tc.name;
+            const toolArgs = tc.arguments;
+            const startTime = Date.now();
+
+            console.error(`\n${"=".repeat(60)}`);
+            console.error(`[TOOL CALL] ${toolName}`);
+            console.error(`${"=".repeat(60)}`);
+            console.error(`[TOOL CALL] Arguments:`);
+            console.error(JSON.stringify(toolArgs, null, 2));
+            console.error(`[TOOL CALL] Executing...`);
+
+            try {
+              const toolResult = await executeToolFn(toolName, toolArgs as Record<string, unknown>);
+              const duration = Date.now() - startTime;
+              const resultStr =
+                typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult, null, 2);
+
+              console.error(`[TOOL CALL] ✓ ${toolName} completed in ${duration}ms`);
+              console.error(`[TOOL CALL] Result:`);
+              console.error(resultStr.slice(0, 2000));
+              console.error(`${"=".repeat(60)}\n`);
+
+              // Add tool result as user message (simplified approach)
+              currentMessages.push({
+                role: "user",
+                content: `[Tool Result for ${toolName}]:\n${resultStr.slice(0, 3000)}`,
+              });
+            } catch (error) {
+              const duration = Date.now() - startTime;
+              console.error(`[TOOL CALL] ✗ ${toolName} FAILED in ${duration}ms`);
+              console.error(`[TOOL CALL] Error:`, error);
+              console.error(`${"=".repeat(60)}\n`);
+              currentMessages.push({
+                role: "user",
+                content: `[Tool Error for ${toolName}]: ${error instanceof Error ? error.message : "Unknown error"}`,
+              });
+            }
+          }
+
+          // Continue loop to get final response
+          continue;
+        }
+
+        // No tool calls - return the text response
+        if (result?.content && Array.isArray(result.content)) {
+          const textPart = result.content.find((c) => c.type === "text");
+          if (textPart?.text) return textPart.text;
+        }
+        if (result?.text) return result.text;
+
+        return "No response generated";
+      } catch (error) {
+        console.error("[MeshClient] Tool generation failed:", error);
+        throw error;
+      }
+    }
+
+    return "Reached maximum tool iterations";
+  }
+
+  /**
    * Call perplexity_ask for quick answers via Perplexity
    */
   async perplexityAsk(messages: Message[]): Promise<string> {
@@ -485,13 +842,12 @@ export function resetMeshClient(): void {
 }
 
 /**
- * Check if mesh is available and has required tools
+ * Check if mesh is available (quick check without listing tools)
  * Returns unavailable if we don't have a token yet (STDIO mode before ON_MCP_CONFIGURATION)
  */
 export async function checkMeshAvailability(): Promise<{
   available: boolean;
   hasLLM: boolean;
-  hasPerplexity: boolean;
   tools: string[];
 }> {
   // In STDIO mode, we need ON_MCP_CONFIGURATION to be called first
@@ -502,28 +858,27 @@ export async function checkMeshAvailability(): Promise<{
     return {
       available: false,
       hasLLM: false,
-      hasPerplexity: false,
       tools: [],
     };
   }
 
+  // Quick check - just verify we can connect, don't list all tools
+  // Tools are loaded lazily by the Agent on first message
   try {
     const client = getMeshClient();
-    const tools = await client.listTools();
-    const toolNames = tools.map((t) => t.name);
+    await client.initialize(); // Just ensure we can connect
 
+    // We assume LLM is available if mesh is available (verified when actually used)
     return {
       available: true,
-      hasLLM: toolNames.includes("LLM_DO_GENERATE"),
-      hasPerplexity: toolNames.includes("perplexity_ask"),
-      tools: toolNames,
+      hasLLM: true, // Assume available, will be verified on use
+      tools: [], // Don't list tools eagerly - Agent does this lazily
     };
   } catch {
     // Expected when mesh is not running
     return {
       available: false,
       hasLLM: false,
-      hasPerplexity: false,
       tools: [],
     };
   }
@@ -535,4 +890,3 @@ export async function checkMeshAvailability(): Promise<{
 export function isRunningInMesh(): boolean {
   return meshRequestContext !== null;
 }
-

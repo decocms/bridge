@@ -5,21 +5,24 @@
  * This is the entry point when mesh-bridge runs as a mesh-hosted MCP via STDIO.
  * The mesh calls this process and communicates via JSON-RPC over stdin/stdout.
  *
+ * Mesh credentials are passed via environment variables:
+ * - MESH_TOKEN: JWT token for authenticating with Mesh API
+ * - MESH_URL: Base URL of the Mesh instance
+ * - MESH_STATE: JSON-encoded state with binding values
+ *
  * Flow:
- * 1. Mesh starts this process
+ * 1. Mesh starts this process with MESH_TOKEN/MESH_URL/MESH_STATE env vars
  * 2. Mesh sends `initialize` request
  * 3. Mesh calls `MCP_CONFIGURATION` to get our state schema (bindings we need)
- * 4. User configures bindings in Mesh UI
- * 5. Mesh calls `ON_MCP_CONFIGURATION` with configured state + meshToken + meshUrl
- * 6. We start WebSocket server for extensions, use meshToken for mesh calls
+ * 4. We're ready to make mesh calls using MESH_TOKEN
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import zodToJsonSchema from "zod-to-json-schema";
-import { setMeshRequestContext, resetMeshClient } from "./core/mesh-client.ts";
-import { config, loadPersistedConfig, savePersistedConfig, getPersistedConfig } from "./config.ts";
+import { setMeshRequestContext } from "./core/mesh-client.ts";
+import { config } from "./config.ts";
 import { registerDomain, getAllDomains } from "./core/domain.ts";
 
 // Import the WebSocket server starter
@@ -48,18 +51,30 @@ const BindingOf = (bindingType: string) =>
  * State schema for stdio mode bindings.
  * Defines what bindings we need from the mesh UI.
  *
- * Uses @deco/openrouter as the binding type - this matches the OpenRouter app
- * registered in the mesh registry, which implements the LANGUAGE_MODEL_BINDING.
+ * Based on how mcp-studio does it:
+ * - LLM: For AI responses (@deco/openrouter)
+ * - CONNECTION: For listing/calling tools from other MCPs (@deco/connection)
+ * - DATABASE: For SQL queries (@deco/postgres) - optional
+ * - EVENT_BUS: For pub/sub events (@deco/event-bus) - optional
  */
 const StdioStateSchema = z.object({
-  LLM: BindingOf("@deco/openrouter").describe("LLM binding for AI responses (OpenRouter)"),
+  LLM: BindingOf("@deco/openrouter").describe("LLM for AI responses"),
+  CONNECTION: BindingOf("@deco/connection").describe("Access to other MCP connections"),
+  DATABASE: BindingOf("@deco/postgres").optional().describe("Database for SQL queries (optional)"),
+  EVENT_BUS: BindingOf("@deco/event-bus").optional().describe("Event bus for pub/sub (optional)"),
 });
 
 /**
  * Scopes we require - what tools we need from the bindings
- * LLM_DO_GENERATE is the main tool for generating responses
  */
-const requiredScopes = ["LLM::LLM_DO_GENERATE", "LLM::COLLECTION_LLM_LIST"];
+const requiredScopes = [
+  "LLM::LLM_DO_GENERATE",
+  "LLM::COLLECTION_LLM_LIST",
+  "CONNECTION::COLLECTION_CONNECTIONS_LIST",
+  "CONNECTION::COLLECTION_CONNECTIONS_GET",
+  "DATABASE::DATABASES_RUN_SQL",
+  "EVENT_BUS::*",
+];
 
 // ============================================================================
 // Tool Logging Helper
@@ -73,12 +88,35 @@ function logTool(name: string, args: Record<string, unknown>) {
 }
 
 async function main() {
-  // Load persisted configuration (URL and bindings only, not the expired token)
-  const persisted = loadPersistedConfig();
-  if (persisted.meshUrl && persisted.state) {
-    console.error("[mesh-bridge] Found persisted binding config (waiting for fresh token from mesh)...");
-    // Don't restore the token - it's expired. Just remember the bindings.
-    // The mesh will call ON_MCP_CONFIGURATION with a fresh token.
+  // Read mesh credentials from env vars (passed by mesh when spawning STDIO process)
+  const meshToken = process.env.MESH_TOKEN;
+  const meshUrl = process.env.MESH_URL;
+  const meshStateJson = process.env.MESH_STATE;
+
+  // Parse state from JSON env var
+  let meshState: Record<string, unknown> = {};
+  if (meshStateJson) {
+    try {
+      meshState = JSON.parse(meshStateJson);
+    } catch (e) {
+      console.error("[mesh-bridge] Failed to parse MESH_STATE:", e);
+    }
+  }
+
+  // Set mesh context from env vars - ready to make mesh calls immediately
+  if (meshToken && meshUrl) {
+    setMeshRequestContext({
+      authorization: meshToken,
+      state: meshState,
+      meshUrl: meshUrl,
+    });
+    console.error(`[mesh-bridge] ✅ Mesh context from env vars: ${meshUrl}`);
+    const llmBinding = meshState.LLM as { value?: string } | undefined;
+    if (llmBinding?.value) {
+      console.error(`[mesh-bridge] ✅ LLM binding: ${llmBinding.value}`);
+    }
+  } else {
+    console.error("[mesh-bridge] ⚠️ No MESH_TOKEN/MESH_URL - running without mesh access");
   }
 
   // Register domains
@@ -123,88 +161,8 @@ async function main() {
     },
   );
 
-  // Binding schema for ON_MCP_CONFIGURATION input
-  const BindingInputSchema = z
-    .object({
-      __type: z.string(),
-      value: z.string(),
-    })
-    .optional();
-
-  // ON_MCP_CONFIGURATION - Called when user saves bindings in Mesh UI
-  server.registerTool(
-    "ON_MCP_CONFIGURATION",
-    {
-      title: "On MCP Configuration",
-      description:
-        "Called by Mesh when the user saves binding configuration. Applies the configured state and mesh credentials.",
-      inputSchema: {
-        state: z
-          .object({
-            LLM: BindingInputSchema,
-          })
-          .passthrough()
-          .describe("The configured state from the bindings UI"),
-        scopes: z.array(z.string()).describe("List of authorized scopes"),
-        meshToken: z
-          .string()
-          .optional()
-          .describe("JWT token for authenticating with Mesh API"),
-        meshUrl: z
-          .string()
-          .optional()
-          .describe("Base URL of the Mesh instance"),
-      },
-      annotations: { readOnlyHint: false },
-    },
-    async (args) => {
-      logTool("ON_MCP_CONFIGURATION", { state: args.state, scopes: args.scopes });
-
-      console.error(`[ON_MCP_CONFIGURATION] Full args:`, JSON.stringify(args, null, 2));
-      console.error(`  - meshUrl: ${args.meshUrl}`);
-      console.error(`  - meshToken: ${args.meshToken ? "✅ provided" : "❌ missing"}`);
-      console.error(`  - state: ${JSON.stringify(args.state)}`);
-
-      const state = (args.state || {}) as { LLM?: { __type?: string; value?: string } };
-      const llmConnectionId = state.LLM?.value;
-      
-      console.error(`  - LLM binding: ${llmConnectionId || "NOT CONFIGURED"}`);
-      console.error(`  - LLM type: ${state.LLM?.__type || "unknown"}`);
-      
-
-      if (args.meshToken && args.meshUrl) {
-        setMeshRequestContext({
-          authorization: args.meshToken as string,
-          state: state as Record<string, unknown>,
-          meshUrl: args.meshUrl as string,
-        });
-
-        // Reset mesh client and status cache to pick up new token
-        resetMeshClient();
-        resetMeshStatus();
-
-        // Persist configuration for future restarts (NOT the token - it expires)
-        savePersistedConfig({
-          meshUrl: args.meshUrl as string,
-          llmConnectionId,
-          state: state as Record<string, unknown>,
-        });
-
-        console.error(`[mesh-bridge] ✅ Mesh configured: ${args.meshUrl}`);
-        if (llmConnectionId) {
-          console.error(`[mesh-bridge] ✅ LLM binding: ${llmConnectionId}`);
-        }
-      } else {
-        console.error("[mesh-bridge] ⚠️ Missing meshToken or meshUrl - mesh calls will fail");
-      }
-
-      const result = { success: true, configured: !!(args.meshToken && args.meshUrl) };
-      return {
-        content: [{ type: "text", text: JSON.stringify(result) }],
-        structuredContent: result,
-      };
-    },
-  );
+  // Note: ON_MCP_CONFIGURATION is no longer needed - mesh passes credentials via env vars
+  // The MCP_CONFIGURATION tool above is still needed for the bindings UI
 
   // Register domain-specific tools
   // Note: These tools require a WebSocket session context to work properly.
@@ -245,7 +203,6 @@ async function main() {
   // Log registered tools
   console.error("[mesh-bridge] Registered tools:");
   console.error("  - MCP_CONFIGURATION");
-  console.error("  - ON_MCP_CONFIGURATION");
   domains.forEach((domain) => {
     domain.tools?.forEach((tool) => {
       console.error(`  - ${tool.name}`);
@@ -262,6 +219,7 @@ async function main() {
   const wsServer = startWebSocketServer(wsPort);
 
   // Log to stderr (stdout is for MCP protocol)
+  const hasMeshAccess = !!(meshToken && meshUrl);
   if (wsServer) {
     console.error(`
 ╔══════════════════════════════════════════════════════════════╗
@@ -269,9 +227,11 @@ async function main() {
 ╠══════════════════════════════════════════════════════════════╣
 ║  Transport: STDIO (mesh-hosted)                              ║
 ║  WebSocket: ws://localhost:${wsPort}                            ║
-║  Domains:   ${domains.map((d) => d.id).join(", ").padEnd(42)}║
-║                                                              ║
-║  Waiting for mesh configuration...                           ║
+║  Domains:   ${domains
+      .map((d) => d.id)
+      .join(", ")
+      .padEnd(42)}║
+║  Mesh:      ${hasMeshAccess ? "✅ Connected".padEnd(42) : "❌ No credentials".padEnd(42)}║
 ╚══════════════════════════════════════════════════════════════╝
 `);
   } else {

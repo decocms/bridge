@@ -191,6 +191,14 @@ export interface Session {
   lastActivity: Date;
   /** Conversation history per chat */
   conversations: Map<string, ConversationMessage[]>;
+  /** Whether speaker mode is enabled (responses are spoken aloud) */
+  speakerMode?: boolean;
+  /** Last processed message text (for deduplication) */
+  lastProcessedMessage?: string;
+  /** Active gateway ID */
+  activeGatewayId?: string;
+  /** Active gateway name (for display) */
+  activeGatewayName?: string;
 }
 
 export interface ConversationMessage {
@@ -220,4 +228,3 @@ export function parseFrame(data: string): ClientFrame | null {
 export function stringifyFrame(frame: BridgeFrame): string {
   return JSON.stringify(frame);
 }
-

@@ -54,18 +54,21 @@ console.log(`
 ╠══════════════════════════════════════════════════════════════╣
 ║  WebSocket: ws://localhost:${server.port}                            ║
 ║  Mesh:      ${config.mesh.url.padEnd(42)}║
-║  Domains:   ${domains.map((d) => d.id).join(", ").padEnd(42)}║
+║  Domains:   ${domains
+  .map((d) => d.id)
+  .join(", ")
+  .padEnd(42)}║
 ║                                                              ║
 ║  Waiting for extension connection...                         ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
 
-// Check mesh availability in background
+// Check mesh availability in background (quick check, tools loaded lazily on first message)
 setTimeout(async () => {
   try {
     const status = await checkMeshAvailability();
     if (status.available) {
-      console.log(`[mesh-bridge] Mesh connected: ${status.tools.length} tools, LLM: ${status.hasLLM ? "✅" : "❌"}`);
+      console.log(`[mesh-bridge] Mesh connected ✅ (tools loaded lazily on first message)`);
     }
   } catch {
     console.log("[mesh-bridge] Mesh not available (set MESH_API_KEY for standalone mode)");

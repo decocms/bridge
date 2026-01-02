@@ -24,17 +24,15 @@ let sessionId = null;
 let reconnectInterval = null;
 let selfChatEnabled = true;
 let aiResponsePending = false;
-let messageObserver = null;
+let sendingMessage = false; // True while we're injecting an AI response
 let observerStarted = false;
-let lastObserverTarget = null;
-let processedMessageIds = new Set(); // Track messages we've already processed
-let observerStartTime = 0; // Timestamp when we started observing - ignore older messages
-let lastSeenMessageText = ""; // Last message text we saw - for deduplication
+let lastSeenMessageText = ""; // The LAST message we've seen - only this matters
 
-// Debug/Manual Approval Mode - when ON, shows a button to approve each message instead of auto-processing
-let manualApprovalMode = true; // Start with manual mode ON for debugging
-let pendingApprovals = new Map(); // Map of textKey -> { text, element }
-let seenElements = new WeakSet(); // Track DOM elements we've already processed
+// Mode toggles
+let speakerMode = false; // When ON, AI speaks responses out loud
+
+// Agent mode (FAST = router, SMART = task execution)
+let agentMode = "FAST"; // "FAST" or "SMART"
 
 // =============================================================================
 // LOGGING
@@ -116,18 +114,52 @@ function handleBridgeFrame(frame) {
         reconnectInterval = null;
       }
       debug("Connected! Session:", sessionId, "Domain:", frame.domain);
+      
+      // Sync speaker mode with server
+      sendFrame({
+        type: "command",
+        command: "set_speaker_mode",
+        domain: DOMAIN_ID,
+        args: { enabled: speakerMode },
+      });
       break;
 
     case "send":
       // AI response - inject into WhatsApp
+      // Set flag to pause polling during injection
+      sendingMessage = true;
       sendWhatsAppMessage(frame.text);
       aiResponsePending = false;
+      
+      // CRITICAL: Update lastSeenMessageText to the AI response we just sent
+      // This prevents the poll from picking it up as a "new" message
+      setTimeout(() => {
+        const newLastMsg = getLastMessage();
+        if (newLastMsg) {
+          lastSeenMessageText = newLastMsg;
+          debug("Updated cache after AI response:", newLastMsg.slice(0, 30));
+        }
+        sendingMessage = false; // Resume polling
+      }, 500);
       break;
 
     case "response":
-      // Command response - inject into chat
+      // Command response
       if (frame.text) {
-        sendWhatsAppMessage(frame.text);
+        // Check if it's a speaker mode confirmation (don't inject into chat)
+        if (frame.text.includes("Speaker mode")) {
+          debug("Speaker mode response:", frame.text);
+          // Flash the badge to confirm
+          const badge = document.getElementById("mesh-bridge-badge");
+          if (badge) {
+            badge.style.transform = "translateX(-50%) scale(1.1)";
+            setTimeout(() => {
+              badge.style.transform = "translateX(-50%) scale(1)";
+            }, 200);
+          }
+        } else {
+          sendWhatsAppMessage(frame.text);
+        }
       }
       aiResponsePending = false;
       break;
@@ -143,6 +175,21 @@ function handleBridgeFrame(frame) {
 
     case "event":
       handleBridgeEvent(frame.event, frame.data);
+      break;
+
+    case "speaking_started":
+      debug("Speaking started:", frame.text?.slice(0, 30));
+      showStopSpeakingButton();
+      break;
+
+    case "speaking_ended":
+      debug("Speaking ended (cancelled:", frame.cancelled, ")");
+      hideStopSpeakingButton();
+      break;
+
+    case "agent_mode_changed":
+      debug("Agent mode changed:", frame.mode);
+      updateAgentMode(frame.mode);
       break;
   }
 }
@@ -188,10 +235,10 @@ function createStatusBadge() {
     <style>
       #mesh-bridge-badge {
         position: fixed;
-        top: 8px;
+        top: 60px;
         left: 50%;
         transform: translateX(-50%);
-        padding: 6px 14px;
+        padding: 6px 12px;
         background: #1a1a1a;
         color: white;
         border-radius: 16px;
@@ -200,27 +247,10 @@ function createStatusBadge() {
         z-index: 10000;
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 8px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
         cursor: default;
-        transition: all 0.2s ease;
-        opacity: 0.7;
-      }
-      #mesh-bridge-badge:hover {
-        opacity: 1;
-        padding: 8px 16px;
-      }
-      #mesh-bridge-badge .details {
-        display: none;
-        margin-left: 8px;
-        padding-left: 8px;
-        border-left: 1px solid #444;
-        font-size: 10px;
-        color: #aaa;
-      }
-      #mesh-bridge-badge:hover .details {
-        display: flex;
-        gap: 12px;
+        opacity: 0.85;
       }
       #mesh-bridge-badge .status-dot {
         width: 6px;
@@ -233,69 +263,157 @@ function createStatusBadge() {
         background: #00cc66;
         box-shadow: 0 0 4px #00cc66;
       }
-      #mesh-bridge-badge .mode-toggle {
-        display: none;
-        margin-left: 8px;
-        padding: 3px 8px;
-        background: #333;
+      #mesh-bridge-badge .speaker-toggle {
+        padding: 3px 10px;
         border-radius: 10px;
         cursor: pointer;
         font-size: 10px;
-        transition: all 0.2s ease;
-      }
-      #mesh-bridge-badge:hover .mode-toggle {
-        display: block;
-      }
-      #mesh-bridge-badge .mode-toggle:hover {
+        font-weight: 600;
+        transition: all 0.15s ease;
+        border: none;
         background: #444;
+        color: #aaa;
       }
-      #mesh-bridge-badge .mode-toggle.auto {
-        background: #ff6b35;
+      #mesh-bridge-badge .speaker-toggle:hover {
+        transform: scale(1.05);
+      }
+      #mesh-bridge-badge .speaker-toggle.on {
+        background: #0088cc;
         color: white;
       }
-      #mesh-bridge-badge .mode-toggle.manual {
-        background: #25d366;
+      #mesh-bridge-badge .stop-speaking {
+        padding: 3px 10px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 600;
+        transition: all 0.15s ease;
+        border: none;
+        background: #cc3333;
         color: white;
+        display: none;
+        animation: pulse-stop 1s infinite;
+      }
+      #mesh-bridge-badge .stop-speaking:hover {
+        background: #ff4444;
+        transform: scale(1.05);
+      }
+      #mesh-bridge-badge .stop-speaking.visible {
+        display: inline-block;
+      }
+      @keyframes pulse-stop {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+      }
+      #mesh-bridge-badge .mode-indicator {
+        padding: 3px 8px;
+        border-radius: 8px;
+        font-size: 9px;
+        font-weight: 600;
+        background: #1a3d4d;
+        color: #66aacc;
+      }
+      #mesh-bridge-badge .mode-indicator.smart {
+        background: #4d1a4d;
+        color: #cc66cc;
+        animation: pulse-smart 2s infinite;
+      }
+      @keyframes pulse-smart {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
       }
     </style>
     <div id="mesh-bridge-badge">
       <span class="status-dot"></span>
-      <span class="status-text">Mesh Bridge</span>
-      <span class="details">
-        <span class="detail-session">—</span>
-        <span class="detail-domain">—</span>
-      </span>
-      <span class="mode-toggle manual">🔒 Manual</span>
+      <span class="status-text">Bridge</span>
+      <span class="mode-indicator">⚡ FAST</span>
+      <span class="speaker-toggle">🔇 Mute</span>
+      <span class="stop-speaking">🛑 Stop</span>
     </div>
   `;
   document.body.appendChild(badge);
   
-  // Add click handler for mode toggle
-  const toggle = badge.querySelector(".mode-toggle");
-  toggle.addEventListener("click", (e) => {
+  // Add click handler for speaker toggle
+  const speakerToggle = badge.querySelector(".speaker-toggle");
+  speakerToggle.addEventListener("click", (e) => {
     e.stopPropagation();
-    manualApprovalMode = !manualApprovalMode;
-    updateModeToggle();
+    speakerMode = !speakerMode;
+    updateSpeakerToggle();
+    debug("Speaker mode:", speakerMode ? "ON" : "OFF");
     
-    if (!manualApprovalMode) {
-      // Clear any pending approval buttons when switching to auto
-      clearApprovalButtons();
-    }
+    // Send command to bridge to update session state
+    sendFrame({
+      type: "command",
+      command: "set_speaker_mode",
+      domain: DOMAIN_ID,
+      args: { enabled: speakerMode },
+    });
+  });
+
+  // Add click handler for stop speaking button
+  const stopBtn = badge.querySelector(".stop-speaking");
+  stopBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    debug("Stop speaking clicked");
     
-    debug("Manual approval mode:", manualApprovalMode ? "ON" : "OFF");
+    // Send command to bridge to stop speaking
+    sendFrame({
+      type: "command",
+      command: "stop_speaking",
+      domain: DOMAIN_ID,
+      args: {},
+    });
+    
+    // Hide the button immediately
+    hideStopSpeakingButton();
   });
 }
 
-function updateModeToggle() {
-  const toggle = document.querySelector("#mesh-bridge-badge .mode-toggle");
+function showStopSpeakingButton() {
+  const stopBtn = document.querySelector("#mesh-bridge-badge .stop-speaking");
+  if (stopBtn) {
+    stopBtn.classList.add("visible");
+    debug("Stop button shown");
+  }
+}
+
+function hideStopSpeakingButton() {
+  const stopBtn = document.querySelector("#mesh-bridge-badge .stop-speaking");
+  if (stopBtn) {
+    stopBtn.classList.remove("visible");
+    debug("Stop button hidden");
+  }
+}
+
+function updateAgentMode(mode) {
+  agentMode = mode || "FAST";
+  
+  const indicator = document.querySelector("#mesh-bridge-badge .mode-indicator");
+  if (!indicator) return;
+  
+  if (mode === "SMART") {
+    indicator.textContent = "🧠 SMART";
+    indicator.className = "mode-indicator smart";
+    indicator.title = "Task execution mode - using smart model";
+  } else {
+    indicator.textContent = "⚡ FAST";
+    indicator.className = "mode-indicator";
+    indicator.title = "Router mode - using fast model";
+  }
+  
+  debug("Agent mode updated:", mode);
+}
+
+function updateSpeakerToggle() {
+  const toggle = document.querySelector("#mesh-bridge-badge .speaker-toggle");
   if (!toggle) return;
   
-  if (manualApprovalMode) {
-    toggle.textContent = "🔒 Manual";
-    toggle.className = "mode-toggle manual";
+  if (speakerMode) {
+    toggle.textContent = "🔊 Speaker";
+    toggle.className = "speaker-toggle on";
   } else {
-    toggle.textContent = "⚡ Auto";
-    toggle.className = "mode-toggle auto";
+    toggle.textContent = "🔇 Mute";
+    toggle.className = "speaker-toggle";
   }
 }
 
@@ -304,19 +422,13 @@ function updateStatusUI(status) {
   if (!badgeContainer) return;
 
   const text = badgeContainer.querySelector(".status-text");
-  const detailSession = badgeContainer.querySelector(".detail-session");
-  const detailDomain = badgeContainer.querySelector(".detail-domain");
 
   if (status === "connected") {
     badgeContainer.classList.add("connected");
-    text.textContent = "Mesh Bridge";
-    detailSession.textContent = sessionId ? `Session: ${sessionId.slice(-8)}` : "—";
-    detailDomain.textContent = `Domain: ${DOMAIN_ID}`;
+    text.textContent = "Bridge";
   } else {
     badgeContainer.classList.remove("connected");
-    text.textContent = "Mesh Bridge";
-    detailSession.textContent = "Disconnected";
-    detailDomain.textContent = "—";
+    text.textContent = "Bridge ⚠️";
   }
 }
 
@@ -450,15 +562,38 @@ async function sendWhatsAppMessage(text) {
     return false;
   }
 
-  // Focus and type
+  // Focus and type - handle newlines for WhatsApp's contenteditable
   input.focus();
   input.innerHTML = "";
-  document.execCommand("insertText", false, text);
+  
+  // WhatsApp uses contenteditable, we need to insert text line by line
+  // with Shift+Enter for newlines (or insert <br> elements)
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    // Insert the line text
+    if (lines[i]) {
+      document.execCommand("insertText", false, lines[i]);
+    }
+    
+    // Add newline (except after last line)
+    if (i < lines.length - 1) {
+      // Simulate Shift+Enter for newline in WhatsApp
+      input.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Enter",
+        code: "Enter",
+        keyCode: 13,
+        shiftKey: true,
+        bubbles: true,
+      }));
+      // Also insert a line break directly
+      document.execCommand("insertLineBreak");
+    }
+  }
 
   // Trigger events
   input.dispatchEvent(new Event("input", { bubbles: true }));
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 150));
 
   // Click send or press Enter
   const sendBtn = document.querySelector('[data-testid="send"]');
@@ -484,214 +619,115 @@ async function sendWhatsAppMessage(text) {
 // =============================================================================
 
 /**
- * Reset state for new chat observation.
- * Instead of capturing message IDs (which are unreliable with WhatsApp's virtual scroll),
- * we use a timestamp-based approach: only process messages received AFTER we start watching.
+ * Get the text of the LAST visible message in the chat.
+ * This is the ONLY message we ever consider for processing.
  */
-function resetObserverState() {
-  processedMessageIds.clear();
-  aiResponsePending = false;
-  observerStartTime = Date.now();
-  seenElements = new WeakSet(); // Reset seen elements
+function getLastMessage() {
+  // Find all message rows
+  const rows = document.querySelectorAll('div[data-id]');
+  if (rows.length === 0) return null;
   
-  // Mark ALL currently visible message rows as "seen" so we don't process them
-  const existingRows = document.querySelectorAll('div[data-id], .message-in, .message-out, [role="row"]');
-  for (const row of existingRows) {
-    seenElements.add(row);
+  // Get the LAST row
+  const lastRow = rows[rows.length - 1];
+  
+  // Extract text from it
+  const textSelectors = [
+    'span[data-testid="selectable-text"]',
+    'span.selectable-text',
+    '.copyable-text span',
+    "span[dir='ltr']",
+  ];
+  
+  let text = "";
+  for (const sel of textSelectors) {
+    const textEl = lastRow.querySelector(sel);
+    if (textEl?.innerText?.trim()) {
+      text = textEl.innerText.trim();
+      break;
+    }
   }
   
-  // Capture the last visible message text to avoid processing it as "new"
-  const lastMsg = getLastVisibleMessageText();
-  lastSeenMessageText = lastMsg || "";
-  
-  debug(`Observer state reset. Marked ${existingRows.length} existing rows as seen. Last text: "${lastSeenMessageText.slice(0, 30)}..."`);
+  return text || null;
 }
 
 /**
- * Get the text of the last visible message (for deduplication)
+ * Reset state for new chat - just capture the current last message
  */
-function getLastVisibleMessageText() {
-  const rows = document.querySelectorAll('.message-in, .message-out, [role="row"]');
-  if (rows.length === 0) return null;
+function resetObserverState() {
+  aiResponsePending = false;
   
-  const lastRow = rows[rows.length - 1];
-  const textEl = lastRow.querySelector('span[data-testid="selectable-text"]') ||
-                 lastRow.querySelector(".copyable-text span") ||
-                 lastRow.querySelector("span[dir='ltr']");
+  // Capture the LAST message text - this is what we'll compare against
+  lastSeenMessageText = getLastMessage() || "";
   
-  return textEl?.innerText?.trim() || null;
+  debug(`Observer reset. Last message: "${lastSeenMessageText.slice(0, 50)}..."`);
 }
 
+let pollInterval = null;
+
 function startMessageObserver() {
-  // Check if a chat is open (look for #main which appears when a chat is selected)
+  // Check if a chat is open
   const mainPanel = document.querySelector('#main');
   if (!mainPanel) {
     debug("No chat open (#main not found), will retry when chat opens...");
     observerStarted = false;
-    lastObserverTarget = null;
     return;
   }
 
-  // Don't restart if already observing the same target
-  if (observerStarted && lastObserverTarget === mainPanel) {
+  // Already polling?
+  if (pollInterval) {
     return;
   }
 
-  // Disconnect old observer if exists
-  if (messageObserver) {
-    messageObserver.disconnect();
-  }
-
-  // Reset state for this new observation session
-  // This sets observerStartTime and captures last message text for deduplication
+  // Reset state - capture current last message
   resetObserverState();
-
-  // Use #main as the observation target
-  const messagesContainer = mainPanel;
-  lastObserverTarget = mainPanel;
   observerStarted = true;
-  debug("Setting up message observer on #main");
+  debug("Starting message poll (checking every 500ms)");
 
-  messageObserver = new MutationObserver((mutations) => {
-    if (!selfChatEnabled || !bridgeConnected || aiResponsePending) return;
+  // Simple polling: check if last message changed
+  pollInterval = setInterval(() => {
+    // Skip if not ready or if we're in the middle of sending a response
+    if (!selfChatEnabled || !bridgeConnected || aiResponsePending || sendingMessage) return;
 
-    const inSelfChat = isSelfChat();
-    if (!inSelfChat) {
-      // Log occasionally to help debug
-      if (Math.random() < 0.01) debug("Not in self-chat, skipping");
+    if (!isSelfChat()) return;
+
+    const currentLastMessage = getLastMessage();
+    if (!currentLastMessage) return;
+
+    // Same as before? Skip.
+    if (currentLastMessage === lastSeenMessageText) return;
+
+    // Update cache immediately
+    lastSeenMessageText = currentLastMessage;
+
+    // ONLY process messages starting with ! or /
+    if (!isCommandForBridge(currentLastMessage)) {
+      // Not a command - ignore silently
       return;
     }
 
-    // Wait 3 seconds after observer starts before processing any messages
-    // This prevents processing messages that existed before we started watching
-    // Also gives WhatsApp time to finish rendering all existing messages
-    const timeSinceStart = Date.now() - observerStartTime;
-    if (timeSinceStart < 3000) {
-      return;
-    }
+    // This is a command for the bridge!
+    debug("Command detected:", currentLastMessage.slice(0, 50));
+    processIncomingMessage(currentLastMessage, currentLastMessage);
+  }, 500);
+}
 
-    // Check for new messages
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+/**
+ * Check if a message is a command for the bridge.
+ * ONLY messages starting with ! or / are processed.
+ * Everything else is ignored.
+ */
+function isCommandForBridge(text) {
+  const trimmed = text.trim();
+  return trimmed.startsWith("!") || trimmed.startsWith("/");
+}
 
-        // Try to find the message row
-        const msgRow = node.closest?.("div[data-id]") || 
-                       node.querySelector?.("div[data-id]") ||
-                       node.closest?.(".message-in, .message-out") ||
-                       node.querySelector?.(".message-in, .message-out") ||
-                       node.closest?.('[role="row"]') ||
-                       node.querySelector?.('[role="row"]');
-
-        if (!msgRow) continue;
-        
-        // Skip if we've already seen this DOM element (handles virtual scrolling)
-        if (seenElements.has(msgRow)) continue;
-        seenElements.add(msgRow);
-
-        // Get message text
-        const textSelectors = [
-          'span[data-testid="selectable-text"]',
-          "span.selectable-text",
-          ".copyable-text span",
-          "span[dir='ltr']",
-        ];
-
-        let text = "";
-        for (const sel of textSelectors) {
-          const textEl = msgRow.querySelector(sel);
-          if (textEl?.innerText?.trim()) {
-            text = textEl.innerText.trim();
-            break;
-          }
-        }
-
-        if (!text) continue;
-
-        // ================================================================
-        // AGGRESSIVE FILTERING - Skip anything that looks like AI output
-        // ================================================================
-        
-        // Check for robot emoji ANYWHERE in the first 5 chars (handles whitespace/encoding)
-        const firstChars = text.slice(0, 10);
-        if (firstChars.includes("🤖") || firstChars.includes("🤖")) {
-          // Already processed - skip silently
-          continue;
-        }
-        
-        // Skip long messages (AI responses tend to be longer)
-        if (text.length > 200) {
-          debug("Skipping - message too long (likely AI response)");
-          continue;
-        }
-        
-        // Skip messages with common AI response patterns
-        const aiPatterns = [
-          "No response generated",
-          "I can see you've shared",
-          "I apologize",
-          "Could you tell me",
-          "I'm not able to",
-          "What would you like",
-          "I can help you",
-          "Posso te ajudar",
-          "O que você precisa",
-          "Tudo certo por aí",
-          "Ler mais",  // "Read more" truncation
-          "Copy/paste",
-          "Tell me the main",
-          "Ask specific questions",
-          "steipete.me",  // URLs from previous responses
-          "browser_cookie",  // Code snippets from previous responses
-          "Oi! 👋",  // AI greeting pattern
-          "Opa! 😅",  // AI greeting pattern
-          "Em que posso",  // AI Portuguese patterns
-        ];
-        
-        let isAiResponse = false;
-        for (const pattern of aiPatterns) {
-          if (text.includes(pattern)) {
-            debug("Skipping AI response (matches pattern):", pattern);
-            isAiResponse = true;
-            break;
-          }
-        }
-        if (isAiResponse) continue;
-        
-        // TEXT-BASED DEDUPLICATION
-        const textKey = text.slice(0, 100);
-        
-        // Skip if we've already processed this exact text
-        if (processedMessageIds.has(textKey)) continue;
-        
-        // Skip if this was the last message we saw when starting
-        if (text === lastSeenMessageText) {
-          debug("Skipping - matches last seen message");
-          continue;
-        }
-
-        // Mark as processed BEFORE we do anything else
-        processedMessageIds.add(textKey);
-
-        debug("New user message:", text.slice(0, 50));
-        
-        if (manualApprovalMode) {
-          // Show approval button instead of auto-processing
-          showApprovalButton(msgRow, textKey, text);
-        } else {
-          processIncomingMessage(textKey, text);
-        }
-      }
-    }
-  });
-
-  messageObserver.observe(messagesContainer, {
-    childList: true,
-    subtree: true,
-  });
-
-  observerStarted = true;
-  debug("Message observer started (observing #main)");
+function stopMessageObserver() {
+  if (pollInterval) {
+    clearInterval(pollInterval);
+    pollInterval = null;
+  }
+  observerStarted = false;
+  debug("Message poll stopped");
 }
 
 /**
@@ -757,79 +793,6 @@ function clickSelfChat() {
 /**
  * Show an approval button next to a message (for manual approval mode)
  */
-function showApprovalButton(msgRow, textKey, text) {
-  // Check if we already have a button for this message
-  if (pendingApprovals.has(textKey)) return;
-  
-  // Create approval button
-  const btn = document.createElement("button");
-  btn.className = "mesh-bridge-approve-btn";
-  btn.innerHTML = "🤖 Process with AI";
-  btn.style.cssText = `
-    position: absolute;
-    right: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    background: linear-gradient(135deg, #25d366 0%, #128c7e 100%);
-    color: white;
-    border: none;
-    border-radius: 16px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    z-index: 1000;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    transition: all 0.2s ease;
-  `;
-  
-  btn.onmouseover = () => {
-    btn.style.transform = "translateY(-50%) scale(1.05)";
-    btn.style.boxShadow = "0 4px 12px rgba(0,0,0,0.4)";
-  };
-  btn.onmouseout = () => {
-    btn.style.transform = "translateY(-50%) scale(1)";
-    btn.style.boxShadow = "0 2px 8px rgba(0,0,0,0.3)";
-  };
-  
-  btn.onclick = (e) => {
-    e.stopPropagation();
-    e.preventDefault();
-    
-    // Remove button
-    btn.remove();
-    pendingApprovals.delete(textKey);
-    
-    // Process the message
-    debug("Manual approval: processing message");
-    processIncomingMessage(textKey, text);
-  };
-  
-  // Make the message row position relative so we can position the button
-  const originalPosition = msgRow.style.position;
-  msgRow.style.position = "relative";
-  
-  msgRow.appendChild(btn);
-  pendingApprovals.set(textKey, { text, element: btn, msgRow, originalPosition });
-  
-  debug("Showing approval button for:", text.slice(0, 30));
-}
-
-/**
- * Clear all pending approval buttons
- */
-function clearApprovalButtons() {
-  for (const [key, data] of pendingApprovals) {
-    if (data.element?.parentNode) {
-      data.element.remove();
-    }
-    if (data.msgRow && data.originalPosition !== undefined) {
-      data.msgRow.style.position = data.originalPosition;
-    }
-  }
-  pendingApprovals.clear();
-}
-
 function processIncomingMessage(messageId, text) {
   if (aiResponsePending) {
     debug("Skipping - AI response still pending");
@@ -838,7 +801,7 @@ function processIncomingMessage(messageId, text) {
 
   aiResponsePending = true;
 
-  debug("Sending to bridge:", text.slice(0, 50));
+  debug("Sending to bridge:", text.slice(0, 50), "speakerMode:", speakerMode);
 
   // Send to bridge
   sendFrame({
@@ -849,6 +812,7 @@ function processIncomingMessage(messageId, text) {
     chatId: getChatName(),
     isSelf: true,
     timestamp: Date.now(),
+    speakerMode: speakerMode, // Include speaker mode flag
   });
 }
 
@@ -886,27 +850,34 @@ function init() {
       }, 1000);
     }
 
-    // Watch for chat changes (when user clicks different chats)
+    // Watch for chat changes - stop and restart observer with fresh state
+    let currentChatName = getChatName();
+    
     const sidePane = document.querySelector("#pane-side");
     if (sidePane) {
       let debounceTimer = null;
       new MutationObserver(() => {
-        // Debounce - only restart after mutations stop for 500ms
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-          if (document.querySelector('#main')) {
+          const newChatName = getChatName();
+          if (newChatName !== currentChatName && newChatName !== "unknown") {
+            debug("Chat changed from", currentChatName, "to", newChatName);
+            currentChatName = newChatName;
+            // Stop old observer, restart fresh
+            stopMessageObserver();
             startMessageObserver();
           }
         }, 500);
       }).observe(sidePane, { childList: true, subtree: true });
     }
 
-    // Also watch for #main appearing (when any chat is opened)
+    // Watch for #main appearing (when any chat is opened)
     const appContainer = document.querySelector('#app');
     if (appContainer) {
       new MutationObserver(() => {
         if (document.querySelector('#main') && !observerStarted) {
           debug("Chat opened, starting observer...");
+          currentChatName = getChatName();
           startMessageObserver();
         }
       }).observe(appContainer, { childList: true, subtree: true });

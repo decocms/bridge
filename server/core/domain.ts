@@ -32,6 +32,10 @@ export interface DomainConfig {
   aiPrefix?: string;
   /** Default LLM model */
   defaultModel?: string;
+  /** Fast model for routing (cheap/quick) */
+  fastModel?: string;
+  /** Smart model for complex execution (optional) */
+  smartModel?: string;
 }
 
 export interface DomainMessage {
@@ -99,13 +103,12 @@ export interface Domain {
   handleMessage: (message: DomainMessage, ctx: DomainContext) => Promise<void>;
 
   /**
-   * Handle a slash command (e.g., /status, /help)
+   * Handle a command from the extension (e.g., /status, /help, set_speaker_mode)
    */
   handleCommand?: (
-    command: string,
-    args: string[],
+    command: { id: string; command: string; args?: Record<string, unknown> | string[] },
     ctx: DomainContext,
-  ) => Promise<{ handled: boolean; response?: string }>;
+  ) => Promise<void>;
 
   /**
    * Domain-specific tools exposed to the mesh
@@ -195,4 +198,3 @@ export function getAllDomainTools(): Array<DomainTool & { domainId: string; full
 
   return allTools;
 }
-

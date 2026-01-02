@@ -1,66 +1,11 @@
 /**
  * Configuration for mesh-bridge
+ *
+ * Mesh credentials are now passed via environment variables when spawning:
+ * - MESH_TOKEN: JWT token for mesh API calls
+ * - MESH_URL: Base URL of the mesh instance
+ * - MESH_STATE: JSON-encoded state with binding values
  */
-
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-
-// Config file path - in the project root
-const CONFIG_FILE = join(dirname(import.meta.dir), ".mesh-bridge-config.json");
-
-/**
- * Persisted mesh configuration
- * NOTE: We do NOT persist meshToken because JWT tokens expire (typically 5 min).
- * The mesh sends a fresh token via ON_MCP_CONFIGURATION on each connection.
- */
-interface PersistedConfig {
-  meshUrl?: string;
-  llmConnectionId?: string;
-  state?: Record<string, unknown>;
-  savedAt?: string;
-}
-
-let persistedConfig: PersistedConfig = {};
-
-/**
- * Load persisted configuration from file
- */
-export function loadPersistedConfig(): PersistedConfig {
-  try {
-    if (existsSync(CONFIG_FILE)) {
-      const data = readFileSync(CONFIG_FILE, "utf-8");
-      persistedConfig = JSON.parse(data);
-      console.error(`[config] Loaded persisted config from ${CONFIG_FILE}`);
-      console.error(`[config]   - meshUrl: ${persistedConfig.meshUrl}`);
-      console.error(`[config]   - llmConnectionId: ${persistedConfig.llmConnectionId}`);
-      console.error(`[config]   - savedAt: ${persistedConfig.savedAt}`);
-      return persistedConfig;
-    }
-  } catch (err) {
-    console.error(`[config] Failed to load persisted config:`, err);
-  }
-  return {};
-}
-
-/**
- * Save configuration to file
- */
-export function savePersistedConfig(cfg: PersistedConfig): void {
-  try {
-    persistedConfig = { ...cfg, savedAt: new Date().toISOString() };
-    writeFileSync(CONFIG_FILE, JSON.stringify(persistedConfig, null, 2));
-    console.error(`[config] Saved config to ${CONFIG_FILE}`);
-  } catch (err) {
-    console.error(`[config] Failed to save config:`, err);
-  }
-}
-
-/**
- * Get the current persisted config
- */
-export function getPersistedConfig(): PersistedConfig {
-  return persistedConfig;
-}
 
 export const config = {
   // WebSocket server port for extension connection
@@ -70,7 +15,11 @@ export const config = {
   mesh: {
     url: process.env.MESH_URL || "http://localhost:3000",
     apiKey: process.env.MESH_API_KEY || null,
-    defaultModel: process.env.DEFAULT_MODEL || "anthropic/claude-sonnet-4",
+    defaultModel: process.env.DEFAULT_MODEL || "google/gemini-2.5-flash",
+    /** Fast model for routing - cheap and quick */
+    fastModel: process.env.FAST_MODEL || process.env.DEFAULT_MODEL || "google/gemini-2.5-flash",
+    /** Smart model for complex execution - optional, defaults to fastModel */
+    smartModel: process.env.SMART_MODEL || undefined,
   },
 
   // Terminal safety
@@ -91,11 +40,13 @@ export const config = {
 
 export function validateConfig(): void {
   console.log(`[mesh-bridge] Mesh URL: ${config.mesh.url}`);
+  console.log(`[mesh-bridge] Fast model (router): ${config.mesh.fastModel}`);
+  console.log(
+    `[mesh-bridge] Smart model (executor): ${config.mesh.smartModel || "(same as fast)"}`,
+  );
   console.log(`[mesh-bridge] Default model: ${config.mesh.defaultModel}`);
 
   if (config.terminal.allowedPaths.length === 0) {
-    console.log(
-      "[mesh-bridge] Note: ALLOWED_PATHS not set. Terminal commands will be disabled.",
-    );
+    console.log("[mesh-bridge] Note: ALLOWED_PATHS not set. Terminal commands will be disabled.");
   }
 }
