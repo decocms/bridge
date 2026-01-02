@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Mesh Bridge",
+  "version": "1.0.0",
+  "description": "Universal browser bridge for MCP Mesh - control any website through AI",
+  "permissions": ["activeTab", "storage"],
+  "host_permissions": [
+    "https://web.whatsapp.com/*",
+    "https://*.whatsapp.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://web.whatsapp.com/*", "https://*.whatsapp.com/*"],
+      "js": ["domains/whatsapp/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Mesh Bridge"
+  },
+  "commands": {
+    "reload-extension": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Alt+Shift+R"
+      },
+      "description": "Reload the extension (dev mode)"
+    }
+  }
+}

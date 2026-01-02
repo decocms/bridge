@@ -1,0 +1,32 @@
+{
+  "name": "mesh-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Universal browser bridge for MCP Mesh - control any website through AI",
+  "bin": {
+    "mesh-bridge": "./server/stdio.ts"
+  },
+  "scripts": {
+    "server": "bun server/main.ts",
+    "dev": "bun --watch server/stdio.ts",
+    "dev:standalone": "bun --watch server/main.ts",
+    "stdio": "bun server/stdio.ts",
+    "test": "bun test",
+    "test:mesh": "bun test server/core/mesh-client.test.ts",
+    "check": "tsc --noEmit",
+    "fmt": "biome format --write .",
+    "fmt:check": "biome format .",
+    "chrome": "open -na 'Google Chrome' --args --load-extension=\"$(pwd)/extension\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.20.2",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.24.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "bun-types": "^1.3.5",
+    "typescript": "^5.7.2"
+  }
+}

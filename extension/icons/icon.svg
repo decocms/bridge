@@ -1,0 +1,20 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#25D366"/>
+      <stop offset="100%" style="stop-color:#128C7E"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  <!-- WhatsApp-style phone icon simplified -->
+  <path d="M64 24c-22.1 0-40 17.9-40 40 0 7.1 1.8 13.8 5 19.6L24 104l20.8-5.4c5.7 3.1 12.2 4.9 19.2 4.9 22.1 0 40-17.9 40-40s-17.9-40-40-40z" fill="white" fill-opacity="0.9"/>
+  <!-- Robot face for AI -->
+  <circle cx="64" cy="58" r="20" fill="#128C7E"/>
+  <circle cx="56" cy="54" r="4" fill="white"/>
+  <circle cx="72" cy="54" r="4" fill="white"/>
+  <rect x="54" y="64" width="20" height="6" rx="3" fill="white"/>
+  <!-- Antenna -->
+  <line x1="64" y1="38" x2="64" y2="32" stroke="#128C7E" stroke-width="3"/>
+  <circle cx="64" cy="30" r="4" fill="#128C7E"/>
+</svg>

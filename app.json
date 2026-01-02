@@ -1,0 +1,19 @@
+{
+  "scopeName": "local",
+  "name": "mesh-bridge",
+  "friendlyName": "Mesh Bridge",
+  "description": "Universal browser bridge for MCP Mesh - control any website through AI",
+  "icon": "https://raw.githubusercontent.com/decocms/mesh/main/apps/mesh/public/mesh-icon.png",
+  "connection": {
+    "type": "COMMAND",
+    "command": "bun",
+    "args": ["run", "stdio"],
+    "cwd": "/Users/guilherme/Projects/mesh-bridge"
+  },
+  "unlisted": true,
+  "bindings": {
+    "requires": ["LLM"],
+    "provides": ["BROWSER_BRIDGE"]
+  },
+  "domains": ["whatsapp"]
+}
