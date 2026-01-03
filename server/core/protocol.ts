@@ -4,7 +4,7 @@
  * Defines the WebSocket protocol for communication between
  * browser extensions and the mesh-bridge server.
  *
- * Supports multiple domains (WhatsApp, Slack, Gmail, etc.)
+ * Supports multiple domains (WhatsApp, LinkedIn, X, etc.) — RPA for any website
  */
 
 // ============================================================================
@@ -17,7 +17,7 @@ export interface ConnectFrame {
   client: string;
   /** Client version */
   version: string;
-  /** Domain this client is connecting for (e.g., "whatsapp", "slack") */
+  /** Domain this client is connecting for (e.g., "whatsapp", "linkedin", "x") */
   domain: string;
   /** Current page URL */
   url?: string;

@@ -15,8 +15,8 @@
 ┌──────────────────────────────┴──────────────────────────────────┐
 │                   MESH BRIDGE (port 9999)                        │
 │  ┌─────────────┬─────────────┬─────────────┬─────────────┐      │
-│  │  WhatsApp   │    Slack    │   Gmail     │    ...      │      │
-│  │  (domain)   │  (domain)   │  (domain)   │  (domain)   │      │
+│  │  WhatsApp   │  LinkedIn   │      X      │    ...      │      │
+│  │  (domain)   │  (domain)   │  (domain)   │  (any site) │      │
 │  └─────────────┴─────────────┴─────────────┴─────────────┘      │
 └──────────────────────────────┬──────────────────────────────────┘
                                │ WebSocket
@@ -62,9 +62,9 @@ interface Domain {
 | Domain | Status | URL Patterns | Description |
 |--------|--------|--------------|-------------|
 | WhatsApp | ✅ | `web.whatsapp.com` | Self-chat AI, message scraping |
-| Slack | 🔜 | `app.slack.com` | AI in Slack channels |
-| Gmail | 🔜 | `mail.google.com` | Email AI assistant |
-| Twitter | 🔜 | `x.com`, `twitter.com` | Tweet composition, DMs |
+| LinkedIn | 🔜 | `linkedin.com` | AI-powered messaging and networking |
+| X (Twitter) | 🔜 | `x.com`, `twitter.com` | Tweet composition, DMs |
+| Any Site | 🛠️ | `*` | RPA for any website—add a domain! |
 
 ## Protocol
 
@@ -172,11 +172,14 @@ mesh-bridge/
 
 ## Future Domains
 
-Ideas for domains to implement:
+Next up:
+- **LinkedIn** - AI-powered messaging, connection requests, networking
+- **X (Twitter)** - Compose tweets, manage DMs, threads
 
-- **Slack** - AI in channels, summarize threads
-- **Gmail** - Draft emails, summarize inbox
-- **Twitter/X** - Compose tweets, manage DMs
+RPA potential for any website:
 - **Linear** - Create issues from chat
 - **Notion** - Add notes, search docs
 - **GitHub** - Review PRs, create issues
+- **Gmail** - Draft emails, summarize inbox
+- **Slack** - AI in channels, summarize threads
+- **Any website** - Just add a domain!

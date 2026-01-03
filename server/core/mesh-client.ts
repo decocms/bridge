@@ -137,6 +137,34 @@ export function getEventBusBindingId(): string | undefined {
  * Call a tool on a specific Mesh connection via the proxy API.
  * This allows STDIO MCPs to use bindings just like HTTP MCPs.
  */
+// Connection name cache for better logging
+const connectionNameCache = new Map<string, string>();
+
+export function cacheConnectionName(connectionId: string, name: string): void {
+  connectionNameCache.set(connectionId, name);
+}
+
+function formatArgsForLog(args: Record<string, unknown>): string {
+  const keys = Object.keys(args);
+  if (keys.length === 0) return "{}";
+  if (keys.length > 4) return `{${keys.slice(0, 3).join(", ")}... +${keys.length - 3}}`;
+
+  const parts = keys.map((k) => {
+    const v = args[k];
+    if (typeof v === "string") {
+      return `${k}:"${v.slice(0, 20)}${v.length > 20 ? "..." : ""}"`;
+    }
+    if (typeof v === "number" || typeof v === "boolean") {
+      return `${k}:${v}`;
+    }
+    if (Array.isArray(v)) {
+      return `${k}:[${v.length}]`;
+    }
+    return `${k}:{...}`;
+  });
+  return `{${parts.join(", ")}}`;
+}
+
 export async function callMeshTool<T = unknown>(
   connectionId: string,
   toolName: string,
@@ -148,6 +176,13 @@ export async function callMeshTool<T = unknown>(
   if (!token) {
     throw new Error("Mesh not configured. Configure bindings in Mesh UI first.");
   }
+
+  // Get connection name for logging
+  const connName = connectionNameCache.get(connectionId) || connectionId.slice(0, 12);
+  const argsStr = formatArgsForLog(args);
+  const startTime = Date.now();
+
+  console.error(`[Mesh] → ${connName}/${toolName} ${argsStr}`);
 
   const endpoint = `${meshUrl}/mcp/${connectionId}`;
 
@@ -220,54 +255,66 @@ export async function callMeshTool<T = unknown>(
     throw new Error(`Mesh tool error: ${json.error.message}`);
   }
 
+  const duration = Date.now() - startTime;
+
+  // Helper to log success and return
+  const logSuccess = (result: T, type: string): T => {
+    console.error(`[Mesh] ✓ ${connName}/${toolName} (${duration}ms) → ${type}`);
+    return result;
+  };
+
   // Return structured content if available
   if (json.result?.structuredContent) {
-    return json.result.structuredContent as T;
+    return logSuccess(json.result.structuredContent as T, "structured");
   }
 
   // Process content array
   const content = json.result?.content;
   if (!content || content.length === 0) {
-    // Debug: Log what we received when there's no content
-    console.error(
-      `[Mesh] No content in response. Keys: ${Object.keys(json.result || {}).join(", ")}`,
-    );
-    if (json.result) {
-      console.error(`[Mesh] Result preview: ${JSON.stringify(json.result).slice(0, 200)}`);
-    }
+    console.error(`[Mesh] ✓ ${connName}/${toolName} (${duration}ms) → empty`);
+    return null as T;
   }
+
   if (content && content.length > 0) {
     // Look for image content first (base64 data) - MCP standard format
     const imageItem = content.find((c) => c.type === "image" || c.data);
     if (imageItem?.data && imageItem?.mimeType) {
       const dataUrl = `data:${imageItem.mimeType};base64,${imageItem.data}`;
-      return { image: dataUrl, mimeType: imageItem.mimeType } as T;
+      return logSuccess({ image: dataUrl, mimeType: imageItem.mimeType } as T, "image");
     }
 
     // Look for text content
     const textItem = content.find((c) => c.type === "text" || c.text);
     if (textItem?.text) {
       if (textItem.text.startsWith("MCP error")) {
+        console.error(`[Mesh] ✗ ${connName}/${toolName} (${duration}ms) → MCP error`);
         throw new Error(textItem.text);
       }
       try {
         const parsed = JSON.parse(textItem.text);
         // Check if parsed result contains an image (from OpenRouter)
         if (parsed.image && typeof parsed.image === "string" && parsed.image.startsWith("data:")) {
-          return parsed as T;
+          return logSuccess(parsed as T, "image-json");
         }
-        return parsed as T;
+        // Show brief result type
+        const resultType = Array.isArray(parsed)
+          ? `array[${parsed.length}]`
+          : typeof parsed === "object"
+            ? Object.keys(parsed).slice(0, 3).join(",")
+            : typeof parsed;
+        return logSuccess(parsed as T, resultType);
       } catch {
         // Check if text itself is a data URL
         if (textItem.text.startsWith("data:image/")) {
-          return { image: textItem.text } as T;
+          return logSuccess({ image: textItem.text } as T, "image-data");
         }
         // If not JSON, return wrapped
-        return { text: textItem.text } as T;
+        return logSuccess({ text: textItem.text } as T, `text(${textItem.text.length})`);
       }
     }
   }
 
+  console.error(`[Mesh] ✓ ${connName}/${toolName} (${duration}ms) → null`);
   return null as T;
 }
 

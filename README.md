@@ -2,7 +2,7 @@
 
 **Universal browser bridge for MCP Mesh—control any website through AI.**
 
-A Chrome extension and local server that connects websites to your MCP Mesh. Define **domains** (WhatsApp, Slack, Gmail, etc.) with custom message handlers, tools, and watchers.
+A Chrome extension and local server that connects websites to your MCP Mesh. Define **domains** (WhatsApp, LinkedIn, X, etc.) with custom message handlers and tools. Works like **RPA for any website**, powered by AI.
 
 ## Architecture
 
@@ -15,8 +15,8 @@ A Chrome extension and local server that connects websites to your MCP Mesh. Def
 ┌──────────────────────────────┴──────────────────────────────────┐
 │                   MESH BRIDGE                                    │
 │  ┌─────────────┬─────────────┬─────────────┬─────────────┐      │
-│  │  WhatsApp   │    Slack    │   Gmail     │    ...      │      │
-│  │  (domain)   │  (domain)   │  (domain)   │  (domain)   │      │
+│  │  WhatsApp   │  LinkedIn   │      X      │    ...      │      │
+│  │  (domain)   │  (domain)   │  (domain)   │  (any site) │      │
 │  └─────────────┴─────────────┴─────────────┴─────────────┘      │
 └──────────────────────────────┬──────────────────────────────────┘
                                │ WebSocket (port 9999)
@@ -48,9 +48,9 @@ Domains are plugins that define how to interact with a specific website:
 
 ```typescript
 const myDomain: Domain = {
-  id: "slack",
-  name: "Slack",
-  urlPatterns: [/^https?:\/\/app\.slack\.com/],
+  id: "linkedin",
+  name: "LinkedIn",
+  urlPatterns: [/^https?:\/\/(www\.)?linkedin\.com/],
   
   // Handle incoming messages
   handleMessage: async (message, ctx) => {
@@ -65,7 +65,7 @@ const myDomain: Domain = {
   tools: [
     {
       name: "SEND_MESSAGE",
-      description: "Send a Slack message",
+      description: "Send a LinkedIn message",
       execute: async (input, ctx) => { /* ... */ },
     },
   ],
@@ -77,8 +77,9 @@ const myDomain: Domain = {
 | Domain | Status | Description |
 |--------|--------|-------------|
 | WhatsApp | ✅ Ready | Message yourself to chat with AI |
-| Slack | 🔜 Planned | AI assistant in Slack |
-| Gmail | 🔜 Planned | Email AI assistant |
+| LinkedIn | 🔜 Planned | AI-powered messaging and networking |
+| X (Twitter) | 🔜 Planned | Compose tweets, manage DMs |
+| Any Site | 🛠️ RPA | Add a domain for any website! |
 
 ## Quick Start
 
@@ -150,7 +151,7 @@ ALLOWED_PATHS=/Users/you/Projects
 
 ## Adding a New Domain
 
-Follow these steps to add support for a new website (e.g., Slack, Gmail, Twitter).
+Follow these steps to add support for a new website. This works for **any website**—think of it as AI-powered RPA.
 
 ### Step 1: Create the Domain Handler
 

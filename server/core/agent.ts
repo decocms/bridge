@@ -103,65 +103,62 @@ function getRouterSystemPrompt(): string {
       ? config.terminal.allowedPaths.join(", ")
       : "/Users/guilherme/Projects/";
 
-  return `You are a PLANNING agent. You select tools and create execution plans. The SMART executor does the actual work.
+  return `You are a FAST PLANNING agent. Your job is to:
+1. Understand what the user wants
+2. Explore available tools AND relevant files
+3. Create a detailed execution plan for the SMART executor
 
 **Your Tools:**
-1. list_local_tools: See available local tools
-2. list_mesh_tools: See available mesh tools WITH DESCRIPTIONS (read them carefully!)
-3. get_tool_schemas: Get full tool parameters if needed
-4. execute_task: Hand off plan + tools to the SMART executor
+- list_local_tools: See file/shell/notification tools
+- list_mesh_tools: See API tools (READ DESCRIPTIONS - they have instructions!)
+- explore_files: List directory contents to find interesting files
+- peek_file: Read a file to see if it's relevant
+- execute_task: Hand off to SMART executor with plan + tools + context
 
 **WORKFLOW:**
 
-1. LIST TOOLS
-   - list_local_tools() → see file, shell, notification tools
-   - list_mesh_tools() → see API tools, READ DESCRIPTIONS CAREFULLY
+STEP 1: DISCOVER TOOLS
+- Call list_local_tools() AND list_mesh_tools()
+- Note which tools are relevant to the user's request
 
-2. GET SCHEMAS (for complex tools)
-   - get_tool_schemas() → get FULL schema with required params and valid values
-   - IMPORTANT: For tools like GENERATE_IMAGE, you NEED the schema to know valid model names
-   - Include this info in your execution plan
+STEP 2: EXPLORE FILES (if user mentions files/projects)
+- Use explore_files("${allowedPaths}mesh-bridge/") to see project structure
+- Use peek_file to read READMEs or key files
+- Identify the most interesting files for the task
 
-3. THINK ABOUT THE TASK
-   - What does the user want?
-   - Which tools are needed? (include ALL that might help)
-   - For content creation: include TONE_OF_VOICE if available
-   - For file tasks: include LIST_FILES, READ_FILE
-   - Select MORE tools rather than fewer
+STEP 3: CREATE EXECUTION PLAN
+Call execute_task with:
+- task: Detailed step-by-step instructions (numbered list)
+- tools: ALL tools executor needs
+- context: Include file contents you gathered in step 2!
 
-4. CREATE EXECUTION PLAN
-   - Write a clear, detailed plan in the "task" field
-   - Include step-by-step instructions
-   - **Include required parameters and valid values from schemas**
-   - Example: "Use GENERATE_IMAGE with model='gemini-2.0-flash-exp-image-generation'"
+**EXAMPLE - Writing an article about a project:**
 
-5. EXECUTE
-   - execute_task with comprehensive plan and ALL relevant tools
-   - Include local tools (READ_FILE, LIST_FILES) so executor can explore
-   - Include mesh tools (TONE_OF_VOICE, CREATE_ARTICLE, etc.)
+1. Call list_mesh_tools() → find TONE_OF_VOICE, COLLECTION_ARTICLES_CREATE
+2. Call explore_files("/Users/guilherme/Projects/mesh-bridge/") → see README.md, server/, etc.
+3. Call peek_file("...mesh-bridge/README.md") → understand the project
+4. Call execute_task with:
+   - task: "Write an engaging article about mesh-bridge. Use the README content and tone of voice. Call COLLECTION_ARTICLES_CREATE with full content."
+   - tools: [TONE_OF_VOICE, COLLECTION_ARTICLES_CREATE]
+   - context: "README content: ... (paste what you read)"
 
-**Example Plan:**
-"1. Use LIST_FILES to explore /Users/guilherme/Projects/context/
-2. Use READ_FILE to read the tone of voice guide
-3. Use TONE_OF_VOICE tool to get writing style
-4. Create the article using COLLECTION_ARTICLES_CREATE with proper tone"
-
-**File System:** ${allowedPaths}
-
-**Rules:**
-- Simple questions: respond directly (no tools needed)
-- "List X tools" or "what tools": call list_mesh_tools ONCE, then respond with the list - NO execute_task needed
-- Complex tasks: think carefully, select relevant tools, write detailed plan
-- DON'T call the same tool multiple times - if you got a result, use it
+**RULES:**
+- Simple questions → respond directly (no tools)
+- "List tools" requests → call list_mesh_tools, respond with results
+- Complex tasks → explore files, gather context, then execute_task
+- Include gathered file contents in the context field!
 - Match user's language (PT/EN)
 
-**CRITICAL: Use EXACT tool names from the list!**
-- Tool names are case-sensitive and must match EXACTLY
-- Example: if list shows "NANO_BANANA_GENERATE_IMAGE", use that - NOT "GENERATE_IMAGE"
-- If unsure of exact name, call list_mesh_tools again to verify`;
+**File System Access:** ${allowedPaths}`;
 }
 
 function createRouterTools(localTools: LocalTool[], meshClient: MeshClient): ToolDefinition[] {
+  // Get allowed paths for file exploration
+  const allowedPaths =
+    config.terminal.allowedPaths.length > 0
+      ? config.terminal.allowedPaths.join(", ")
+      : "/Users/guilherme/Projects/";
+
   return [
     {
       name: "list_local_tools",
@@ -183,6 +180,36 @@ function createRouterTools(localTools: LocalTool[], meshClient: MeshClient): Too
             description: "Optional: filter by specific connection ID",
           },
         },
+      },
+    },
+    // File exploration tools for FAST agent to discover relevant files
+    {
+      name: "explore_files",
+      description: `List files in a directory to discover project structure. Use this to find interesting files before planning. Allowed paths: ${allowedPaths}`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Directory path to explore (must be within allowed paths)",
+          },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "peek_file",
+      description:
+        "Read a file to understand its contents. Use this to gauge if a file is relevant for the task. Returns first 200 lines.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "File path to read",
+          },
+        },
+        required: ["path"],
       },
     },
     {
@@ -344,6 +371,13 @@ export class Agent {
       const connections = await this.meshClient.listConnections();
       connectionCache.connections = connections;
       connectionCache.lastFetched = now;
+
+      // Cache connection names for mesh-client logging
+      const { cacheConnectionName } = await import("./mesh-client.ts");
+      for (const conn of connections) {
+        cacheConnectionName(conn.id, conn.title);
+      }
+
       return connections;
     } catch (error) {
       // Silently fail - will use cached or empty
@@ -488,7 +522,7 @@ export class Agent {
 
     // Track tool calls for loop detection
     const toolCallCounts = new Map<string, number>();
-    const MAX_SAME_TOOL = 2; // Max times same tool can be called
+    const MAX_SAME_TOOL = 5; // Max times same tool can be called (execute_task may need retries after validation)
 
     for (let i = 0; i < (this.config.maxRouterIterations || 3); i++) {
       const result = await this.callLLM(this.config.fastModel, messages, routerTools);
@@ -566,6 +600,72 @@ export class Agent {
         }));
         this.sendProgress(`📦 Found ${tools.length} local tools`);
         return { tools, count: tools.length };
+      }
+
+      case "explore_files": {
+        const path = args.path as string;
+        if (!path) {
+          return { error: "Missing 'path' parameter" };
+        }
+
+        // Find the LIST_FILES tool
+        const listFilesTool = this.localTools.find((t) => t.name === "LIST_FILES");
+        if (!listFilesTool) {
+          return { error: "LIST_FILES tool not available" };
+        }
+
+        try {
+          const result = (await listFilesTool.execute({ path })) as {
+            content?: Array<{ text?: string }>;
+          };
+          // Parse result if it's a text response
+          if (result?.content?.[0]?.text) {
+            const parsed = JSON.parse(result.content[0].text);
+            this.sendProgress(`📂 Found ${parsed.count || 0} items in ${path.split("/").pop()}`);
+            return {
+              path: parsed.path,
+              files: parsed.files?.slice(0, 30), // Limit to 30 files for context
+              count: parsed.count,
+              hint: "Select interesting files for the executor to read",
+            };
+          }
+          return result;
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Failed to list files" };
+        }
+      }
+
+      case "peek_file": {
+        const path = args.path as string;
+        if (!path) {
+          return { error: "Missing 'path' parameter" };
+        }
+
+        // Find the READ_FILE tool
+        const readFileTool = this.localTools.find((t) => t.name === "READ_FILE");
+        if (!readFileTool) {
+          return { error: "READ_FILE tool not available" };
+        }
+
+        try {
+          const result = (await readFileTool.execute({ path, limit: 200 })) as {
+            content?: Array<{ text?: string }>;
+          };
+          // Parse and truncate for context
+          if (result?.content?.[0]?.text) {
+            const parsed = JSON.parse(result.content[0].text);
+            this.sendProgress(`📄 Read ${parsed.path?.split("/").pop() || path}`);
+            return {
+              path: parsed.path,
+              preview: parsed.content?.slice(0, 3000), // Truncate for router context
+              totalLines: parsed.totalLines,
+              hint: "Decide if this file is relevant for the task",
+            };
+          }
+          return result;
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : "Failed to read file" };
+        }
       }
 
       case "list_mesh_tools": {
@@ -731,18 +831,6 @@ export class Agent {
           };
         }
 
-        // Enforce: get_tool_schemas must be called for mesh tools
-        const hasMeshTools = toolRequests.some((t) => t.source === "mesh");
-        const hasGotSchemas = previousTools.includes("get_tool_schemas");
-        if (hasMeshTools && !hasGotSchemas) {
-          return {
-            error:
-              "You MUST call get_tool_schemas BEFORE execute_task when using mesh tools. This gives you the required parameters.",
-            hint: "Step 1: list_mesh_tools. Step 2: get_tool_schemas for the tools you need. Step 3: execute_task with the params info in your task description.",
-            workflow: "list_mesh_tools → get_tool_schemas → execute_task",
-          };
-        }
-
         // Switch to SMART mode for task execution
         this.setMode("SMART");
         this.sendProgress(`🧠 Starting execution with ${toolRequests.length} tools...`);
@@ -859,32 +947,53 @@ export class Agent {
         : "/Users/guilherme/Projects/";
 
     // Build executor prompt with gathered context
-    let executorPrompt = `You are an AI assistant executing a task. Use the provided tools via the tool calling API.
+    let executorPrompt = `You are a SMART EXECUTOR agent. You have been given a specific task and the tools to complete it.
 
-**Task:** ${task}
+**YOUR ROLE:**
+You execute tasks step-by-step using the provided tools. You are capable, thorough, and complete the ENTIRE task before responding.
 
-**CRITICAL:**
-- Use tool calling functions, NOT XML/markdown simulation
-- Provide ALL required parameters when calling tools
-- For content creation: Generate actual content (titles, body text, etc.)
-`;
+**TASK TO COMPLETE:**
+${task}
+
+**CRITICAL INSTRUCTIONS:**
+1. FOLLOW THE PLAN: Execute each step in the task description
+2. USE TOOLS: Call tools via the function calling API (never simulate with XML/markdown)
+3. COMPLETE THE TASK: Don't stop until ALL steps are done
+4. BE THOROUGH: For content creation, write actual content (not placeholders)
+5. SUMMARIZE: After completing all steps, provide a brief summary
+
+**CONTENT CREATION RULES:**
+When creating articles, blog posts, or content:
+- Write engaging, complete content (500-2000 words)
+- Use the tone/style from any TONE_OF_VOICE context
+- Include a compelling title
+- Set status to "draft" unless told otherwise
+- The article should be publication-ready
+
+**FILE EXPLORATION:**
+- Allowed paths: ${allowedPaths}
+- Use LIST_FILES to see folder contents
+- Use READ_FILE to read specific files
+- Explore project structure before writing about it`;
 
     // Include gathered context if provided
     if (context) {
       executorPrompt += `
-**Gathered Context (from exploration phase):**
-${context}
-`;
+
+**CONTEXT FROM PLANNING PHASE:**
+${context}`;
     }
 
     executorPrompt += `
-**File System Access:** ${allowedPaths}
 
-**Instructions:**
-1. Use the context above to inform your work
-2. Call tools with complete parameters
-3. Provide a brief summary when done
-4. Match user's language (PT/EN)`;
+**WORKFLOW:**
+1. Execute each step in the task
+2. If exploring files, read the most relevant ones
+3. If creating content, write actual high-quality content
+4. Call the creation/action tools with complete data
+5. Respond with a brief summary of what you accomplished
+
+Match user's language (Portuguese if they wrote in PT, English if EN).`;
 
     const messages: Message[] = [
       { role: "system", content: executorPrompt },

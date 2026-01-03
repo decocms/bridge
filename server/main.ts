@@ -2,7 +2,7 @@
  * mesh-bridge - Main Server Entry Point (Standalone Mode)
  *
  * A universal browser bridge that connects any website to your MCP Mesh.
- * Domains define site-specific behavior (WhatsApp, Slack, Gmail, etc.)
+ * Domains define site-specific behavior (WhatsApp, LinkedIn, X, etc.) — RPA for any website
  *
  * This is the standalone entry point - run manually with `bun run dev`.
  * For mesh-hosted mode, use `server/stdio.ts` instead.
@@ -17,7 +17,7 @@
  * │                   MESH BRIDGE (port 9999)                        │
  * │  Domains · Sessions · Protocol · Routing                        │
  * │  ┌─────────────┬─────────────┬─────────────┐                    │
- * │  │  WhatsApp   │    Slack    │   Gmail     │  ...domains        │
+ * │  │  WhatsApp   │  LinkedIn   │      X      │  ...any site       │
  * │  └─────────────┴─────────────┴─────────────┘                    │
  * └──────────────────────────────┬──────────────────────────────────┘
  *                                │

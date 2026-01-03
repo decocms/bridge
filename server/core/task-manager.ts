@@ -80,8 +80,8 @@ export async function createTask(userMessage: string): Promise<Task> {
     toolsUsed: [],
   };
 
-  // Keep only last 50 tasks
-  store.tasks = [task, ...store.tasks.slice(0, 49)];
+  // Keep only last 10 tasks
+  store.tasks = [task, ...store.tasks.slice(0, 9)];
   await saveTasks(store);
 
   return task;
@@ -178,7 +178,49 @@ export async function getTasksByStatus(status: Task["status"]): Promise<Task[]> 
 }
 
 /**
- * Get task summary for display
+ * Cleanup stale tasks:
+ * - Mark in_progress tasks older than 5 minutes as "error" (stale)
+ * - Mark pending tasks older than 1 minute as "error" (abandoned)
+ * - Keep only the last 10 tasks
+ */
+export async function cleanupTasks(): Promise<{ cleaned: number; removed: number }> {
+  const store = await loadTasks();
+  const now = Date.now();
+  let cleaned = 0;
+
+  for (const task of store.tasks) {
+    const age = now - new Date(task.updatedAt).getTime();
+
+    // Mark stale in_progress tasks (older than 5 minutes)
+    if (task.status === "in_progress" && age > 5 * 60 * 1000) {
+      task.status = "error";
+      task.error = "Task timed out (stale)";
+      task.updatedAt = new Date().toISOString();
+      cleaned++;
+    }
+
+    // Mark abandoned pending tasks (older than 1 minute)
+    if (task.status === "pending" && age > 60 * 1000) {
+      task.status = "error";
+      task.error = "Task abandoned (never started)";
+      task.updatedAt = new Date().toISOString();
+      cleaned++;
+    }
+  }
+
+  // Keep only last 10 tasks
+  const removed = Math.max(0, store.tasks.length - 10);
+  store.tasks = store.tasks.slice(0, 10);
+
+  if (cleaned > 0 || removed > 0) {
+    await saveTasks(store);
+  }
+
+  return { cleaned, removed };
+}
+
+/**
+ * Get task summary for display (also cleans up stale tasks)
  */
 export async function getTaskSummary(): Promise<{
   total: number;
@@ -193,6 +235,9 @@ export async function getTaskSummary(): Promise<{
     age: string;
   }>;
 }> {
+  // Cleanup stale tasks first
+  await cleanupTasks();
+
   const store = await loadTasks();
   const tasks = store.tasks;
 

@@ -4,7 +4,7 @@
  * A domain represents a specific website or service that the mesh-bridge can control.
  * Each domain implements its own message handling, tools, and watchers.
  *
- * Examples: WhatsApp, Slack, Discord, Gmail, Twitter, etc.
+ * Examples: WhatsApp, LinkedIn, X (Twitter), etc. Works as RPA for any website.
  */
 
 import type { Session, BridgeFrame } from "./protocol.ts";
@@ -81,7 +81,7 @@ export interface DomainWatcher {
  * Domain definition - implement this to add support for a new website/service
  */
 export interface Domain {
-  /** Unique domain identifier (e.g., "whatsapp", "slack", "gmail") */
+  /** Unique domain identifier (e.g., "whatsapp", "linkedin", "x") */
   id: string;
 
   /** Display name */
