@@ -34,6 +34,9 @@ let speakerMode = false; // When ON, AI speaks responses out loud
 // Agent mode (FAST = router, SMART = task execution)
 let agentMode = "FAST"; // "FAST" or "SMART"
 
+// Global enable/disable toggle (persisted)
+let extensionEnabled = true;
+
 // =============================================================================
 // LOGGING
 // =============================================================================
@@ -354,8 +357,33 @@ function createStatusBadge() {
       #mesh-bridge-badge .progress-indicator:empty {
         display: none;
       }
+      #mesh-bridge-badge .enable-toggle {
+        padding: 3px 10px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-size: 10px;
+        font-weight: 600;
+        transition: all 0.15s ease;
+        border: none;
+        background: #00cc66;
+        color: white;
+      }
+      #mesh-bridge-badge .enable-toggle:hover {
+        transform: scale(1.05);
+      }
+      #mesh-bridge-badge .enable-toggle.off {
+        background: #cc3333;
+      }
+      #mesh-bridge-badge.disabled {
+        opacity: 0.5;
+      }
+      #mesh-bridge-badge.disabled .status-dot {
+        background: #cc3333 !important;
+        box-shadow: none !important;
+      }
     </style>
     <div id="mesh-bridge-badge">
+      <span class="enable-toggle">ON</span>
       <span class="status-dot"></span>
       <span class="status-text">Bridge</span>
       <span class="mode-indicator">⚡ FAST</span>
@@ -400,6 +428,41 @@ function createStatusBadge() {
     // Hide the button immediately
     hideStopSpeakingButton();
   });
+
+  // Add click handler for enable/disable toggle
+  const enableToggle = badge.querySelector(".enable-toggle");
+  enableToggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    extensionEnabled = !extensionEnabled;
+    updateEnableToggle();
+    debug("Extension enabled:", extensionEnabled ? "ON" : "OFF");
+    
+    // Persist state
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      chrome.storage.local.set({ meshBridgeEnabled: extensionEnabled });
+    }
+    
+    // If disabling, stop the observer
+    if (!extensionEnabled) {
+      stopMessageObserver();
+    } else {
+      // If enabling and we're in self-chat, restart observer
+      if (isSelfChat()) {
+        startMessageObserver();
+      }
+    }
+  });
+
+  // Load persisted state
+  if (typeof chrome !== "undefined" && chrome.storage) {
+    chrome.storage.local.get(["meshBridgeEnabled"], (result) => {
+      if (result.meshBridgeEnabled === false) {
+        extensionEnabled = false;
+        updateEnableToggle();
+        debug("Extension disabled from storage");
+      }
+    });
+  }
 }
 
 function showStopSpeakingButton() {
@@ -485,6 +548,22 @@ function updateSpeakerToggle() {
   } else {
     toggle.textContent = "🔇 Mute";
     toggle.className = "speaker-toggle";
+  }
+}
+
+function updateEnableToggle() {
+  const toggle = document.querySelector("#mesh-bridge-badge .enable-toggle");
+  const badge = document.querySelector("#mesh-bridge-badge");
+  if (!toggle || !badge) return;
+  
+  if (extensionEnabled) {
+    toggle.textContent = "ON";
+    toggle.className = "enable-toggle";
+    badge.classList.remove("disabled");
+  } else {
+    toggle.textContent = "OFF";
+    toggle.className = "enable-toggle off";
+    badge.classList.add("disabled");
   }
 }
 
@@ -910,10 +989,17 @@ function startMessageObserver() {
 
   // Simple polling: check if last message changed
   pollInterval = setInterval(() => {
+    // Skip if extension is disabled
+    if (!extensionEnabled) return;
+    
     // Skip if not ready or if we're in the middle of sending a response
     if (!selfChatEnabled || !bridgeConnected || aiResponsePending || sendingMessage) return;
 
-    if (!isSelfChat()) return;
+    // STRICT: Only process messages in self-chat, never other chats
+    if (!isSelfChat()) {
+      // Silently ignore - we're not in self-chat
+      return;
+    }
 
     const currentLastMessage = getLastMessage();
     if (!currentLastMessage) return;
@@ -1050,6 +1136,23 @@ function init() {
 
   // Create UI
   createStatusBadge();
+
+  // Listen for toggle messages from background script (extension icon click)
+  if (typeof chrome !== "undefined" && chrome.runtime) {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.action === "toggleEnabled") {
+        extensionEnabled = message.enabled;
+        updateEnableToggle();
+        debug("Extension toggled from icon:", extensionEnabled ? "ON" : "OFF");
+        
+        if (!extensionEnabled) {
+          stopMessageObserver();
+        } else if (isSelfChat()) {
+          startMessageObserver();
+        }
+      }
+    });
+  }
 
   // Connect to bridge
   connectToBridge();
