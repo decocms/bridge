@@ -143,6 +143,21 @@ function handleBridgeFrame(frame) {
       }, 500);
       break;
 
+    case "send_image":
+      // Send an image to the chat
+      sendingMessage = true;
+      sendWhatsAppImage(frame.imageUrl, frame.caption).then(() => {
+        setTimeout(() => {
+          const newLastMsg = getLastMessage();
+          if (newLastMsg) {
+            lastSeenMessageText = newLastMsg;
+          }
+          sendingMessage = false;
+        }, 1000);
+      });
+      aiResponsePending = false;
+      break;
+
     case "response":
       // Command response
       if (frame.text) {
@@ -190,6 +205,11 @@ function handleBridgeFrame(frame) {
     case "agent_mode_changed":
       debug("Agent mode changed:", frame.mode);
       updateAgentMode(frame.mode);
+      break;
+
+    case "agent_progress":
+      debug("Agent progress:", frame.message);
+      updateAgentProgress(frame.message);
       break;
   }
 }
@@ -322,11 +342,24 @@ function createStatusBadge() {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.7; }
       }
+      #mesh-bridge-badge .progress-indicator {
+        font-size: 10px;
+        color: #88ccff;
+        padding: 2px 8px;
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #mesh-bridge-badge .progress-indicator:empty {
+        display: none;
+      }
     </style>
     <div id="mesh-bridge-badge">
       <span class="status-dot"></span>
       <span class="status-text">Bridge</span>
       <span class="mode-indicator">⚡ FAST</span>
+      <span class="progress-indicator"></span>
       <span class="speaker-toggle">🔇 Mute</span>
       <span class="stop-speaking">🛑 Stop</span>
     </div>
@@ -402,6 +435,44 @@ function updateAgentMode(mode) {
   }
   
   debug("Agent mode updated:", mode);
+}
+
+function updateAgentProgress(message) {
+  const indicator = document.querySelector("#mesh-bridge-badge .progress-indicator");
+  if (!indicator) {
+    // Create progress indicator if it doesn't exist
+    const badge = document.querySelector("#mesh-bridge-badge");
+    if (badge) {
+      const progress = document.createElement("div");
+      progress.className = "progress-indicator";
+      progress.textContent = message;
+      // Insert after mode indicator
+      const modeIndicator = badge.querySelector(".mode-indicator");
+      if (modeIndicator) {
+        modeIndicator.after(progress);
+      } else {
+        badge.appendChild(progress);
+      }
+      // Auto-hide after 5 seconds if it's a completion message
+      if (message.includes("✅") || message.includes("❌")) {
+        setTimeout(() => {
+          progress.textContent = "";
+        }, 5000);
+      }
+    }
+    return;
+  }
+  
+  indicator.textContent = message;
+  
+  // Auto-hide completion messages
+  if (message.includes("✅") || message.includes("❌")) {
+    setTimeout(() => {
+      indicator.textContent = "";
+    }, 5000);
+  }
+  
+  debug("Agent progress:", message);
 }
 
 function updateSpeakerToggle() {
@@ -614,6 +685,160 @@ async function sendWhatsAppMessage(text) {
   return true;
 }
 
+/**
+ * Send an image to WhatsApp by fetching the URL and pasting it
+ */
+async function sendWhatsAppImage(imageUrl, caption) {
+  debug("Sending image:", imageUrl?.slice(0, 80));
+  
+  try {
+    // Fetch the image
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      debug("Failed to fetch image:", response.status, response.statusText);
+      return false;
+    }
+    
+    const blob = await response.blob();
+    debug("Image fetched, size:", blob.size, "type:", blob.type);
+    
+    // Ensure we have a valid image type
+    const mimeType = blob.type || "image/png";
+    const extension = mimeType.split("/")[1] || "png";
+    const file = new File([blob], `image.${extension}`, { type: mimeType });
+    
+    // Find the attachment button (+ button) and click it
+    const attachBtn = document.querySelector('[data-testid="attach-menu-plus"]') || 
+                      document.querySelector('[data-testid="clip"]') ||
+                      document.querySelector('span[data-icon="attach-menu-plus"]')?.closest('button') ||
+                      document.querySelector('span[data-icon="clip"]')?.closest('div[role="button"]');
+    
+    if (attachBtn) {
+      debug("Found attach button, clicking...");
+      attachBtn.click();
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Look for the image/photo option in the menu
+      const photoOption = document.querySelector('[data-testid="attach-photo"]') ||
+                          document.querySelector('li[data-testid="mi-attach-media"]') ||
+                          document.querySelector('input[accept*="image"]');
+      
+      if (photoOption && photoOption.tagName === 'INPUT') {
+        debug("Found file input, setting files...");
+        // Create a DataTransfer to set files on the input
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        photoOption.files = dt.files;
+        photoOption.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        // Wait for preview to load
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Find and click send - try multiple selectors
+        const sendBtn = document.querySelector('[data-testid="send"]') ||
+                        document.querySelector('[aria-label="Enviar"]') ||
+                        document.querySelector('[aria-label="Send"]') ||
+                        document.querySelector('span[data-icon="wds-ic-send-filled"]')?.closest('[role="button"]');
+        if (sendBtn) {
+          debug("Clicking send button...");
+          sendBtn.click();
+          return true;
+        } else {
+          debug("No send button found after attach flow");
+        }
+      }
+    }
+    
+    // Fallback: Try paste approach
+    debug("Trying paste approach...");
+    const inputSelectors = [
+      '[data-testid="conversation-compose-box-input"]',
+      'div[contenteditable="true"][data-tab="10"]',
+      'footer div[contenteditable="true"]',
+    ];
+    
+    let input = null;
+    for (const sel of inputSelectors) {
+      input = document.querySelector(sel);
+      if (input) break;
+    }
+    
+    if (!input) {
+      debug("Could not find input for image paste");
+      return false;
+    }
+    
+    input.focus();
+    
+    // Try using Clipboard API if available
+    if (navigator.clipboard && navigator.clipboard.write) {
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({ [mimeType]: blob })
+        ]);
+        debug("Wrote to clipboard, simulating paste...");
+        document.execCommand('paste');
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } catch (clipErr) {
+        debug("Clipboard API failed:", clipErr);
+      }
+    }
+    
+    // Create a paste event with the image
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(file);
+    
+    const pasteEvent = new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: dataTransfer,
+    });
+    
+    input.dispatchEvent(pasteEvent);
+    debug("Paste event dispatched");
+    
+    // Also try on document
+    document.dispatchEvent(pasteEvent);
+    
+    // Wait for WhatsApp to process the image and show the preview dialog
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Add caption if provided
+    if (caption) {
+      const captionInput = document.querySelector('[data-testid="media-caption-input-container"] div[contenteditable="true"]');
+      if (captionInput) {
+        captionInput.focus();
+        document.execCommand("insertText", false, caption);
+        captionInput.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Click the send button in the image preview dialog
+    // Try multiple selectors - WhatsApp changes them periodically
+    const sendBtn = document.querySelector('[data-testid="send"]') ||
+                    document.querySelector('[aria-label="Enviar"]') ||
+                    document.querySelector('[aria-label="Send"]') ||
+                    document.querySelector('span[data-icon="wds-ic-send-filled"]')?.closest('[role="button"]') ||
+                    document.querySelector('span[data-icon="send"]')?.closest('[role="button"]');
+    
+    if (sendBtn) {
+      debug("Found send button, clicking...");
+      sendBtn.click();
+      debug("Image send button clicked");
+      return true;
+    } else {
+      debug("Could not find send button for image. Available buttons:", 
+            Array.from(document.querySelectorAll('[role="button"]')).map(b => b.getAttribute('aria-label')).filter(Boolean).join(', '));
+      return false;
+    }
+  } catch (error) {
+    debug("Error sending image:", error);
+    return false;
+  }
+}
+
 // =============================================================================
 // SELF-CHAT AI
 // =============================================================================
@@ -713,12 +938,12 @@ function startMessageObserver() {
 
 /**
  * Check if a message is a command for the bridge.
- * ONLY messages starting with ! or / are processed.
- * Everything else is ignored.
+ * - `/` = shortcuts only (/say, /files, /tasks, etc.)
+ * - `!` or `-` = AI commands
  */
 function isCommandForBridge(text) {
   const trimmed = text.trim();
-  return trimmed.startsWith("!") || trimmed.startsWith("/");
+  return trimmed.startsWith("!") || trimmed.startsWith("-") || trimmed.startsWith("/");
 }
 
 function stopMessageObserver() {

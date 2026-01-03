@@ -7,3 +7,4 @@
 export * from "./protocol.ts";
 export * from "./mesh-client.ts";
 export * from "./domain.ts";
+export * from "./task-manager.ts";

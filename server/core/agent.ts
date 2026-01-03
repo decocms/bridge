@@ -16,6 +16,15 @@
 import type { MeshClient } from "./mesh-client.ts";
 import type { ToolDefinition, Message } from "./mesh-client.ts";
 import { config } from "../config.ts";
+import {
+  createTask,
+  updateTaskStatus,
+  addTaskProgress,
+  addToolUsed,
+  getRecentTasks,
+  getTaskSummary,
+  type Task,
+} from "./task-manager.ts";
 
 // ============================================================================
 // Types
@@ -36,21 +45,25 @@ export interface AgentConfig {
   maxExecutorIterations?: number;
   /** Callback when agent mode changes (FAST/SMART) */
   onModeChange?: (mode: "FAST" | "SMART") => void;
+  /** Callback to send progress updates to UI */
+  onProgress?: (message: string) => void;
+  /** Callback to send events (like images) to UI */
+  sendEvent?: (event: string, data: Record<string, unknown>) => void;
 }
 
 // Connection cache - shared across agent instances for the session
 interface ConnectionCache {
-  connections: Array<{ id: string; title: string; toolCount: number }> | null;
-  connectionDetails: Map<
-    string,
-    { tools: Array<{ name: string; description?: string; inputSchema?: unknown }> }
-  >;
+  connections: Array<{
+    id: string;
+    title: string;
+    toolCount: number;
+    tools: Array<{ name: string; description?: string }>;
+  }> | null;
   lastFetched: number;
 }
 
 const connectionCache: ConnectionCache = {
   connections: null,
-  connectionDetails: new Map(),
   lastFetched: 0,
 };
 
@@ -90,25 +103,62 @@ function getRouterSystemPrompt(): string {
       ? config.terminal.allowedPaths.join(", ")
       : "/Users/guilherme/Projects/";
 
-  return `You are an AI assistant with access to tools. You operate in two phases:
+  return `You are a PLANNING agent. You select tools and create execution plans. The SMART executor does the actual work.
 
-**Phase 1 (Current):** You have 4 meta-tools to discover and select tools:
-- list_local_tools: See what local system tools are available (files, shell, notifications, etc.)
-- list_mesh_tools: See what MCP mesh tools are available (external services)
-- get_tool_schemas: Get full details for specific tools before using them
-- execute_task: Run a task with selected tools
+**Your Tools:**
+1. list_local_tools: See available local tools
+2. list_mesh_tools: See available mesh tools WITH DESCRIPTIONS (read them carefully!)
+3. get_tool_schemas: Get full tool parameters if needed
+4. execute_task: Hand off plan + tools to the SMART executor
 
-**Your job:** Understand what the user wants, find the right tools, then call execute_task.
+**WORKFLOW:**
 
-**File System Access:**
-- Allowed paths: ${allowedPaths}
-- When working with files, always use full paths within these directories
+1. LIST TOOLS
+   - list_local_tools() → see file, shell, notification tools
+   - list_mesh_tools() → see API tools, READ DESCRIPTIONS CAREFULLY
+
+2. GET SCHEMAS (for complex tools)
+   - get_tool_schemas() → get FULL schema with required params and valid values
+   - IMPORTANT: For tools like GENERATE_IMAGE, you NEED the schema to know valid model names
+   - Include this info in your execution plan
+
+3. THINK ABOUT THE TASK
+   - What does the user want?
+   - Which tools are needed? (include ALL that might help)
+   - For content creation: include TONE_OF_VOICE if available
+   - For file tasks: include LIST_FILES, READ_FILE
+   - Select MORE tools rather than fewer
+
+4. CREATE EXECUTION PLAN
+   - Write a clear, detailed plan in the "task" field
+   - Include step-by-step instructions
+   - **Include required parameters and valid values from schemas**
+   - Example: "Use GENERATE_IMAGE with model='gemini-2.0-flash-exp-image-generation'"
+
+5. EXECUTE
+   - execute_task with comprehensive plan and ALL relevant tools
+   - Include local tools (READ_FILE, LIST_FILES) so executor can explore
+   - Include mesh tools (TONE_OF_VOICE, CREATE_ARTICLE, etc.)
+
+**Example Plan:**
+"1. Use LIST_FILES to explore /Users/guilherme/Projects/context/
+2. Use READ_FILE to read the tone of voice guide
+3. Use TONE_OF_VOICE tool to get writing style
+4. Create the article using COLLECTION_ARTICLES_CREATE with proper tone"
+
+**File System:** ${allowedPaths}
 
 **Rules:**
-- For simple questions, just respond directly (no tools needed)
-- For tasks requiring tools, first list available tools, then get schemas, then execute
-- Keep responses SHORT
-- Match user's language (PT/EN)`;
+- Simple questions: respond directly (no tools needed)
+- "List X tools" or "what tools": call list_mesh_tools ONCE, then respond with the list - NO execute_task needed
+- Complex tasks: think carefully, select relevant tools, write detailed plan
+- DON'T call the same tool multiple times - if you got a result, use it
+- Match user's language (PT/EN)
+
+**CRITICAL: Use EXACT tool names from the list!**
+- Tool names are case-sensitive and must match EXACTLY
+- Example: if list shows "NANO_BANANA_GENERATE_IMAGE", use that - NOT "GENERATE_IMAGE"
+- If unsure of exact name, call list_mesh_tools again to verify`;
 }
 
 function createRouterTools(localTools: LocalTool[], meshClient: MeshClient): ToolDefinition[] {
@@ -124,7 +174,7 @@ function createRouterTools(localTools: LocalTool[], meshClient: MeshClient): Too
     {
       name: "list_mesh_tools",
       description:
-        "List available MCP mesh tools from external connections (APIs, databases, etc.)",
+        "List available MCP mesh tools from external connections (APIs, databases, etc.). READ DESCRIPTIONS - they contain important instructions!",
       inputSchema: {
         type: "object",
         properties: {
@@ -165,36 +215,51 @@ function createRouterTools(localTools: LocalTool[], meshClient: MeshClient): Too
     },
     {
       name: "execute_task",
-      description: `Execute a task with specific tools. Example call:
+      description: `Execute a task with a detailed plan. The executor is SMART and CAN explore files.
+
+Example:
 {
-  "task": "Read the README.md file and summarize it",
-  "tools": [{"name": "READ_FILE", "source": "local"}]
+  "task": "Write an article about MCP + WhatsApp integration:\\n1. First, explore /Users/guilherme/Projects/context/ to find tone of voice\\n2. Use TONE_OF_VOICE tool to get writing style\\n3. Read relevant files about the project\\n4. Create the article with proper tone using COLLECTION_ARTICLES_CREATE",
+  "tools": [
+    {"name": "LIST_FILES", "source": "local"},
+    {"name": "READ_FILE", "source": "local"},
+    {"name": "TONE_OF_VOICE", "source": "mesh", "connectionId": "conn_abc"},
+    {"name": "COLLECTION_ARTICLES_CREATE", "source": "mesh", "connectionId": "conn_abc"}
+  ]
 }
-You MUST provide both "task" (string describing what to do) and "tools" (array of tool objects with name and source).`,
+
+IMPORTANT: 
+- Write a DETAILED step-by-step plan in the task field
+- Include LOCAL tools (READ_FILE, LIST_FILES) so executor can explore
+- Include ALL mesh tools that might be useful`,
       inputSchema: {
         type: "object",
         properties: {
           task: {
             type: "string",
             description:
-              "Natural language description of what to do (e.g., 'Read the README.md file')",
+              "Detailed step-by-step execution plan. Be specific about what files to read, what to look for, etc.",
+          },
+          context: {
+            type: "string",
+            description:
+              "Optional notes or hints for the executor (not file contents - it can read those itself)",
           },
           tools: {
             type: "array",
             items: {
               type: "object",
               properties: {
-                name: {
+                name: { type: "string", description: "EXACT tool name from list results" },
+                source: { type: "string", enum: ["local", "mesh"] },
+                connectionId: {
                   type: "string",
-                  description: "Tool name from list_local_tools or list_mesh_tools",
+                  description: "For mesh tools: connectionId from list",
                 },
-                source: { type: "string", enum: ["local", "mesh"], description: "local or mesh" },
-                connectionId: { type: "string", description: "Required for mesh tools only" },
               },
               required: ["name", "source"],
             },
-            description:
-              'Array of tools to load. Example: [{"name": "READ_FILE", "source": "local"}]',
+            description: "Tools the executor should use",
           },
         },
         required: ["task", "tools"],
@@ -212,6 +277,7 @@ export class Agent {
   private localTools: LocalTool[];
   private config: AgentConfig;
   private currentMode: "FAST" | "SMART" = "FAST";
+  private currentTaskId: string | null = null;
 
   constructor(meshClient: MeshClient, localTools: LocalTool[], config: AgentConfig) {
     this.meshClient = meshClient;
@@ -219,10 +285,30 @@ export class Agent {
     this.config = {
       maxTokens: 2048,
       temperature: 0.7,
-      maxRouterIterations: 3,
-      maxExecutorIterations: 5,
+      maxRouterIterations: 10,
+      maxExecutorIterations: 30,
       ...config,
     };
+  }
+
+  /**
+   * Send progress update to UI and log to task
+   */
+  private sendProgress(message: string): void {
+    this.config.onProgress?.(message);
+    // Also log to task file
+    if (this.currentTaskId) {
+      addTaskProgress(this.currentTaskId, message).catch(() => {});
+    }
+  }
+
+  /**
+   * Track tool usage in the current task
+   */
+  private trackToolUsed(toolName: string): void {
+    if (this.currentTaskId) {
+      addToolUsed(this.currentTaskId, toolName).catch(() => {});
+    }
   }
 
   /**
@@ -231,68 +317,117 @@ export class Agent {
   private setMode(mode: "FAST" | "SMART"): void {
     if (this.currentMode !== mode) {
       this.currentMode = mode;
-      console.error(`[Agent] Mode changed to: ${mode}`);
       this.config.onModeChange?.(mode);
     }
   }
 
   /**
-   * Get cached connections, fetching if needed
+   * Get cached connections with tools, fetching if needed
    */
-  private async getConnections(): Promise<Array<{ id: string; title: string; toolCount: number }>> {
+  private async getConnections(): Promise<
+    Array<{
+      id: string;
+      title: string;
+      toolCount: number;
+      tools: Array<{ name: string; description?: string }>;
+    }>
+  > {
     const now = Date.now();
 
     // Return cached if fresh
     if (connectionCache.connections && now - connectionCache.lastFetched < CACHE_TTL) {
-      console.error(`[Agent] Using cached connections (${connectionCache.connections.length})`);
       return connectionCache.connections;
     }
 
     // Fetch fresh
-    console.error(`[Agent] Fetching connections from mesh...`);
     try {
       const connections = await this.meshClient.listConnections();
       connectionCache.connections = connections;
       connectionCache.lastFetched = now;
-      console.error(`[Agent] Cached ${connections.length} connections`);
       return connections;
     } catch (error) {
-      console.error(`[Agent] Failed to fetch connections:`, error);
+      // Silently fail - will use cached or empty
       return connectionCache.connections || [];
     }
   }
 
+  // Schema cache for full tool schemas (inputSchema)
+  private schemaCache: Map<
+    string,
+    { tools: Array<{ name: string; description?: string; inputSchema?: unknown }> }
+  > = new Map();
+
   /**
-   * Get cached connection details, fetching if needed
+   * Format args for compact logging
+   */
+  private formatArgsForLog(args: Record<string, unknown>): string {
+    const keys = Object.keys(args);
+    if (keys.length === 0) return "{}";
+    if (keys.length <= 3) {
+      // Show values for small objects
+      const parts = keys.map((k) => {
+        const v = args[k];
+        if (typeof v === "string") return `${k}:"${v.slice(0, 30)}${v.length > 30 ? "..." : ""}"`;
+        if (typeof v === "number" || typeof v === "boolean") return `${k}:${v}`;
+        return `${k}:<${typeof v}>`;
+      });
+      return parts.join(", ");
+    }
+    // Just show key names for large objects
+    return keys.join(", ");
+  }
+
+  /**
+   * Format result for compact logging
+   */
+  private formatResultForLog(result: unknown): string {
+    if (result === null || result === undefined) return "null";
+    if (typeof result === "string")
+      return `"${result.slice(0, 50)}${result.length > 50 ? "..." : ""}"`;
+    if (typeof result === "number" || typeof result === "boolean") return String(result);
+    if (typeof result === "object") {
+      const obj = result as Record<string, unknown>;
+      if ("error" in obj) return `error: ${obj.error}`;
+      if ("success" in obj) return `success: ${obj.success}`;
+      if ("id" in obj) return `id: ${obj.id}`;
+      const keys = Object.keys(obj);
+      return `{${keys.slice(0, 3).join(", ")}${keys.length > 3 ? "..." : ""}}`;
+    }
+    return String(result).slice(0, 50);
+  }
+
+  /**
+   * Get connection details with full tool schemas (for execution)
    */
   private async getConnectionDetails(connectionId: string): Promise<{
     tools: Array<{ name: string; description?: string; inputSchema?: unknown }>;
   } | null> {
-    // Check cache first
-    if (connectionCache.connectionDetails.has(connectionId)) {
-      console.error(`[Agent] Using cached details for ${connectionId}`);
-      return connectionCache.connectionDetails.get(connectionId)!;
+    // Check schema cache first
+    if (this.schemaCache.has(connectionId)) {
+      return this.schemaCache.get(connectionId)!;
     }
 
-    // Fetch from mesh
-    console.error(`[Agent] Fetching details for connection ${connectionId}...`);
+    // Fetch full details from mesh (includes inputSchema)
     try {
       const { callMeshTool, getConnectionBindingId } = await import("./mesh-client.ts");
       const connBindingId = getConnectionBindingId();
       if (!connBindingId) return null;
 
-      const conn = await callMeshTool<{
-        id: string;
-        title: string;
-        tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+      // API returns { item: { ... } } wrapper
+      const result = await callMeshTool<{
+        item?: {
+          id: string;
+          title: string;
+          tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+        };
       }>(connBindingId, "COLLECTION_CONNECTIONS_GET", { id: connectionId });
 
+      const conn = result?.item;
       const details = { tools: conn?.tools || [] };
-      connectionCache.connectionDetails.set(connectionId, details);
-      console.error(`[Agent] Cached ${details.tools.length} tools for ${connectionId}`);
+      this.schemaCache.set(connectionId, details);
       return details;
     } catch (error) {
-      console.error(`[Agent] Failed to fetch connection details:`, error);
+      // Silently fail - return null
       return null;
     }
   }
@@ -301,24 +436,47 @@ export class Agent {
    * Run the agent on a user message
    */
   async run(userMessage: string, conversationHistory: Message[] = []): Promise<string> {
-    console.error(`\n[Agent] ========== NEW REQUEST ==========`);
-    console.error(`[Agent] User: "${userMessage.slice(0, 100)}..."`);
-    console.error(`[Agent] Fast model: ${this.config.fastModel}`);
-    console.error(`[Agent] Smart model: ${this.config.smartModel || "(same as fast)"}`);
+    console.error(
+      `\n[FAST] ─── ${userMessage.slice(0, 80)}${userMessage.length > 80 ? "..." : ""}`,
+    );
+
+    // Create task for tracking
+    const task = await createTask(userMessage);
+    this.currentTaskId = task.id;
+
+    this.sendProgress("🔍 Analyzing request...");
 
     // Start in FAST mode
     this.setMode("FAST");
 
-    // Phase 1: Router
-    return this.runRouter(userMessage, conversationHistory);
+    try {
+      // Phase 1: Router
+      const result = await this.runRouter(userMessage, conversationHistory);
+
+      // Mark task as completed
+      await updateTaskStatus(this.currentTaskId, "completed", result);
+      this.currentTaskId = null;
+
+      return result;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`[Agent] Fatal error: ${errorMsg}`);
+      this.sendProgress(`❌ Error: ${errorMsg}`);
+
+      // Mark task as error
+      if (this.currentTaskId) {
+        await updateTaskStatus(this.currentTaskId, "error", undefined, errorMsg);
+        this.currentTaskId = null;
+      }
+
+      return `Sorry, I encountered an error: ${errorMsg}`;
+    }
   }
 
   /**
    * Phase 1: Router - Uses fast model with 4 meta-tools
    */
   private async runRouter(userMessage: string, conversationHistory: Message[]): Promise<string> {
-    console.error(`[Agent] Phase 1: ROUTER`);
-
     const messages: Message[] = [
       { role: "system", content: getRouterSystemPrompt() },
       ...conversationHistory,
@@ -326,30 +484,50 @@ export class Agent {
     ];
 
     const routerTools = createRouterTools(this.localTools, this.meshClient);
+    const usedTools: string[] = [];
+
+    // Track tool calls for loop detection
+    const toolCallCounts = new Map<string, number>();
+    const MAX_SAME_TOOL = 2; // Max times same tool can be called
 
     for (let i = 0; i < (this.config.maxRouterIterations || 3); i++) {
-      console.error(`[Agent] Router iteration ${i + 1}/${this.config.maxRouterIterations}`);
-
       const result = await this.callLLM(this.config.fastModel, messages, routerTools);
 
       // If no tool calls, return the response
       if (!result.toolCalls || result.toolCalls.length === 0) {
-        console.error(`[Agent] Router: No tool calls, returning response`);
+        if (usedTools.length > 0) {
+          console.error(`[FAST] Tools used: ${usedTools.join(" → ")}`);
+        }
         return result.text || "I couldn't generate a response.";
       }
 
       // Process tool calls
       for (const tc of result.toolCalls) {
-        console.error(`[Agent] Router tool call: ${tc.name}`);
+        // Loop detection: don't call same tool too many times
+        const callCount = (toolCallCounts.get(tc.name) || 0) + 1;
+        toolCallCounts.set(tc.name, callCount);
+
+        if (callCount > MAX_SAME_TOOL) {
+          console.error(`[FAST] ⚠️ Skipping ${tc.name} (called ${callCount} times)`);
+          messages.push({
+            role: "user",
+            content: `[Warning] You already called ${tc.name} ${callCount - 1} times. Use the results you have or respond to the user.`,
+          });
+          continue;
+        }
+
+        usedTools.push(tc.name);
         const toolResult = await this.executeRouterTool(
           tc.name,
           tc.arguments,
           userMessage,
           conversationHistory,
+          usedTools, // Pass history to enforce workflow
         );
 
         // If execute_task was called, it returns the final response
         if (tc.name === "execute_task" && typeof toolResult === "string") {
+          console.error(`[FAST] Tools used: ${usedTools.join(" → ")}`);
           return toolResult;
         }
 
@@ -365,6 +543,7 @@ export class Agent {
       }
     }
 
+    console.error(`[FAST] Tools used: ${usedTools.join(" → ")} (limit reached)`);
     return "I couldn't complete the request within the iteration limit.";
   }
 
@@ -376,10 +555,8 @@ export class Agent {
     args: Record<string, unknown>,
     originalTask: string,
     conversationHistory: Message[],
+    previousTools: string[] = [],
   ): Promise<unknown> {
-    console.error(`\n[Agent] Router executing: ${name}`);
-    console.error(`[Agent] Args: ${JSON.stringify(args)}`);
-
     switch (name) {
       case "list_local_tools": {
         const tools = this.localTools.map((t) => ({
@@ -387,38 +564,48 @@ export class Agent {
           description: t.description.slice(0, 100) + (t.description.length > 100 ? "..." : ""),
           source: "local",
         }));
-        console.error(`[Agent] Listed ${tools.length} local tools`);
+        this.sendProgress(`📦 Found ${tools.length} local tools`);
         return { tools, count: tools.length };
       }
 
       case "list_mesh_tools": {
         const connectionId = args.connectionId as string | undefined;
         try {
+          // Get all connections with their tools (single call, cached)
+          const connections = await this.getConnections();
+
           if (connectionId) {
-            // List tools from specific connection (cached)
-            const details = await this.getConnectionDetails(connectionId);
-            if (!details) {
-              return { error: "CONNECTION binding not configured or connection not found" };
+            // Filter to specific connection
+            const conn = connections.find((c) => c.id === connectionId);
+            if (!conn) {
+              return { error: `Connection not found: ${connectionId}` };
             }
 
-            const tools = details.tools.map((t) => ({
+            const tools = conn.tools.map((t) => ({
               name: t.name,
               description: (t.description || "").slice(0, 100),
               source: "mesh",
               connectionId,
             }));
-            return { tools, count: tools.length, connectionId };
+            return { tools, count: tools.length, connectionId, connectionName: conn.title };
           } else {
-            // List all connections with tool counts (cached)
-            const connections = await this.getConnections();
-            return {
-              connections: connections.map((c) => ({
-                id: c.id,
-                name: c.title,
-                toolCount: c.toolCount,
+            // Flatten all tools with descriptions for easy searching
+            const allTools = connections.flatMap((c) =>
+              c.tools.map((t) => ({
+                name: t.name,
+                description: (t.description || "").slice(0, 150),
+                connectionId: c.id,
+                connectionName: c.title,
               })),
-              count: connections.length,
-              hint: "Use list_mesh_tools with connectionId to see tools from a specific connection",
+            );
+
+            this.sendProgress(
+              `🔌 Found ${allTools.length} mesh tools from ${connections.length} connections`,
+            );
+            return {
+              allTools,
+              totalToolCount: allTools.length,
+              hint: "Select MULTIPLE related tools for the task. Read descriptions carefully.",
             };
           }
         } catch (error) {
@@ -427,12 +614,25 @@ export class Agent {
       }
 
       case "get_tool_schemas": {
-        const toolRequests = args.tools as Array<{
-          name: string;
-          source: string;
-          connectionId?: string;
-        }>;
+        const toolRequests = args.tools as
+          | Array<{
+              name: string;
+              source: string;
+              connectionId?: string;
+            }>
+          | undefined;
+
+        if (!toolRequests || !Array.isArray(toolRequests) || toolRequests.length === 0) {
+          return {
+            error: "Missing 'tools' array in get_tool_schemas call.",
+            hint: "Call with {tools: [{name: 'TOOL_NAME', source: 'mesh', connectionId: '...'}]}",
+          };
+        }
+
         const schemas: ToolSchema[] = [];
+
+        // Get cached connections to help find tools without connectionId
+        const cachedConnections = await this.getConnections();
 
         for (const req of toolRequests) {
           if (req.source === "local") {
@@ -445,38 +645,55 @@ export class Agent {
                 source: "local",
               });
             }
-          } else if (req.source === "mesh" && req.connectionId) {
+          } else if (req.source === "mesh") {
+            // Auto-find connectionId if not provided
+            let connectionId = req.connectionId;
+            if (!connectionId) {
+              const connWithTool = cachedConnections.find((c) =>
+                c.tools.some((t) => t.name === req.name),
+              );
+              if (connWithTool) {
+                connectionId = connWithTool.id;
+              }
+            }
+
+            if (!connectionId) {
+              continue; // Can't find this tool
+            }
+
             try {
               const { callMeshTool, getConnectionBindingId } = await import("./mesh-client.ts");
               const connBindingId = getConnectionBindingId();
               if (connBindingId) {
-                const conn = await callMeshTool<{
-                  tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
-                }>(connBindingId, "COLLECTION_CONNECTIONS_GET", { id: req.connectionId });
+                const result = await callMeshTool<{
+                  item?: {
+                    tools?: Array<{ name: string; description?: string; inputSchema?: unknown }>;
+                  };
+                }>(connBindingId, "COLLECTION_CONNECTIONS_GET", { id: connectionId });
 
-                const tool = conn?.tools?.find((t) => t.name === req.name);
+                const tool = result?.item?.tools?.find((t) => t.name === req.name);
                 if (tool) {
                   schemas.push({
                     name: tool.name,
                     description: tool.description || "",
                     inputSchema: (tool.inputSchema as Record<string, unknown>) || {},
                     source: "mesh",
-                    connectionId: req.connectionId,
+                    connectionId,
                   });
                 }
               }
-            } catch (error) {
-              console.error(`[Agent] Failed to get schema for ${req.name}:`, error);
+            } catch {
+              // Skip tools that fail to load
             }
           }
         }
 
-        console.error(`[Agent] Got ${schemas.length} tool schemas`);
         return { schemas, count: schemas.length };
       }
 
       case "execute_task": {
         const task = args.task as string | undefined;
+        const context = args.context as string | undefined;
         const toolRequests = args.tools as
           | Array<{
               name: string;
@@ -485,18 +702,28 @@ export class Agent {
             }>
           | undefined;
 
-        // Validate required fields - LLM sometimes hallucinates wrong schema
+        // Enforce workflow: must list tools before executing
+        const hasListedTools = previousTools.some(
+          (t) => t === "list_mesh_tools" || t === "list_local_tools",
+        );
+        if (!hasListedTools) {
+          return {
+            error: "You MUST call list_mesh_tools or list_local_tools FIRST before execute_task.",
+            hint: "Step 1: List tools. Step 2: Explore (read files, gather context). Step 3: Execute with full context.",
+            workflow: "list_tools → explore → execute_task(task, context, tools)",
+          };
+        }
+
+        // Validate required fields
         if (!task || typeof task !== "string") {
-          console.error(`[Agent] execute_task called with invalid task:`, args);
           return {
             error: "Invalid execute_task call. Missing 'task' field.",
-            hint: "Call execute_task with {task: 'description', tools: [{name: 'TOOL_NAME', source: 'local'}]}",
+            hint: "Call execute_task with {task: 'description', context: 'gathered info', tools: [...]}",
             receivedArgs: args,
           };
         }
 
         if (!toolRequests || !Array.isArray(toolRequests) || toolRequests.length === 0) {
-          console.error(`[Agent] execute_task called with invalid tools:`, args);
           return {
             error: "Invalid execute_task call. Missing or empty 'tools' array.",
             hint: "Call execute_task with {task: 'description', tools: [{name: 'TOOL_NAME', source: 'local'}]}",
@@ -504,15 +731,28 @@ export class Agent {
           };
         }
 
+        // Enforce: get_tool_schemas must be called for mesh tools
+        const hasMeshTools = toolRequests.some((t) => t.source === "mesh");
+        const hasGotSchemas = previousTools.includes("get_tool_schemas");
+        if (hasMeshTools && !hasGotSchemas) {
+          return {
+            error:
+              "You MUST call get_tool_schemas BEFORE execute_task when using mesh tools. This gives you the required parameters.",
+            hint: "Step 1: list_mesh_tools. Step 2: get_tool_schemas for the tools you need. Step 3: execute_task with the params info in your task description.",
+            workflow: "list_mesh_tools → get_tool_schemas → execute_task",
+          };
+        }
+
         // Switch to SMART mode for task execution
         this.setMode("SMART");
-
-        console.error(`[Agent] Phase 2: EXECUTOR`);
-        console.error(`[Agent] Task: "${task}"`);
-        console.error(`[Agent] Tools requested: ${toolRequests.map((t) => t.name).join(", ")}`);
+        this.sendProgress(`🧠 Starting execution with ${toolRequests.length} tools...`);
 
         // Load the requested tools (using cache)
         const loadedTools: Array<ToolDefinition & { source: string; connectionId?: string }> = [];
+
+        // Get cached connections to help find tools without connectionId
+        const cachedConnections = await this.getConnections();
+        const allCachedToolNames = cachedConnections.flatMap((c) => c.tools.map((t) => t.name));
 
         for (const req of toolRequests) {
           if (req.source === "local") {
@@ -525,28 +765,64 @@ export class Agent {
                 source: "local",
               });
             }
-          } else if (req.source === "mesh" && req.connectionId) {
-            // Use cached connection details
-            const details = await this.getConnectionDetails(req.connectionId);
-            if (details) {
-              const tool = details.tools.find((t) => t.name === req.name);
-              if (tool) {
-                loadedTools.push({
-                  name: tool.name,
-                  description: tool.description || "",
-                  inputSchema: (tool.inputSchema as Record<string, unknown>) || {},
-                  source: "mesh",
-                  connectionId: req.connectionId,
-                });
+          } else if (req.source === "mesh") {
+            // Try to find connectionId if not provided
+            let connectionId = req.connectionId;
+            if (!connectionId) {
+              // Search through cached connections to find which one has this tool
+              const connWithTool = cachedConnections.find((c) =>
+                c.tools.some((t) => t.name === req.name),
+              );
+              if (connWithTool) {
+                connectionId = connWithTool.id;
+              } else {
+                // Tool not in any cached connection - LLM may have hallucinated
+                // Find similar tool names to help debug
+                const similarTools = allCachedToolNames.filter(
+                  (name) =>
+                    name.toLowerCase().includes(req.name.toLowerCase()) ||
+                    req.name.toLowerCase().includes(name.toLowerCase().replace(/_/g, "")),
+                );
+                console.error(`[SMART] Tool "${req.name}" not found in any connection`);
+                if (similarTools.length > 0) {
+                  console.error(`[SMART] Did you mean: ${similarTools.join(", ")}?`);
+                } else {
+                  console.error(
+                    `[SMART] Available tools: ${allCachedToolNames.slice(0, 15).join(", ")}...`,
+                  );
+                }
+              }
+            }
+
+            if (connectionId) {
+              // Use cached connection details for full schema
+              const details = await this.getConnectionDetails(connectionId);
+              if (details) {
+                const tool = details.tools.find((t) => t.name === req.name);
+                if (tool) {
+                  loadedTools.push({
+                    name: tool.name,
+                    description: tool.description || "",
+                    inputSchema: (tool.inputSchema as Record<string, unknown>) || {},
+                    source: "mesh",
+                    connectionId,
+                  });
+                }
               }
             }
           }
         }
 
-        console.error(`[Agent] Loaded ${loadedTools.length} tools for execution`);
+        // Log what we loaded vs what was requested
+        if (loadedTools.length !== toolRequests.length) {
+          console.error(
+            `[SMART] Warning: Requested ${toolRequests.length} tools, loaded ${loadedTools.length}`,
+          );
+          console.error(`[SMART] Requested: ${toolRequests.map((t) => t.name).join(", ")}`);
+        }
 
-        // Run the executor
-        const result = await this.runExecutor(task, loadedTools, conversationHistory);
+        // Run the executor with gathered context
+        const result = await this.runExecutor(task, context, loadedTools, conversationHistory);
 
         // Return to FAST mode after execution
         this.setMode("FAST");
@@ -560,37 +836,59 @@ export class Agent {
   }
 
   /**
-   * Phase 2: Executor - Uses smart model with specific tools
+   * Phase 2: Executor - Uses smart model with specific tools and gathered context
    */
   private async runExecutor(
     task: string,
+    context: string | undefined,
     tools: Array<ToolDefinition & { source: string; connectionId?: string }>,
     conversationHistory: Message[],
   ): Promise<string> {
     const model = this.config.smartModel || this.config.fastModel;
-    console.error(`[Agent] Executor using model: ${model}`);
-    console.error(
-      `[Agent] Executor has ${tools.length} tools: ${tools.map((t) => t.name).join(", ")}`,
-    );
+
+    // Log executor start
+    console.error(`\n[SMART] ─── Task: ${task.slice(0, 60)}${task.length > 60 ? "..." : ""}`);
+    console.error(`[SMART] Available: ${tools.map((t) => t.name).join(", ")}`);
+    if (context) {
+      console.error(`[SMART] Context: ${context.length} chars`);
+    }
 
     const allowedPaths =
       config.terminal.allowedPaths.length > 0
         ? config.terminal.allowedPaths.join(", ")
         : "/Users/guilherme/Projects/";
 
-    const executorPrompt = `You are executing a specific task. You have been given specific tools to use.
+    // Build executor prompt with gathered context
+    let executorPrompt = `You are an AI assistant executing a task. Use the provided tools via the tool calling API.
 
-Task: ${task}
+**Task:** ${task}
 
-**File System Access:**
-- Allowed paths: ${allowedPaths}
-- When working with files, always use full paths within these directories
+**CRITICAL:**
+- Use tool calling functions, NOT XML/markdown simulation
+- Provide ALL required parameters when calling tools
+- For content creation: Generate actual content (titles, body text, etc.)
+`;
 
-Use the available tools to complete this task. Be concise in your response.`;
+    // Include gathered context if provided
+    if (context) {
+      executorPrompt += `
+**Gathered Context (from exploration phase):**
+${context}
+`;
+    }
+
+    executorPrompt += `
+**File System Access:** ${allowedPaths}
+
+**Instructions:**
+1. Use the context above to inform your work
+2. Call tools with complete parameters
+3. Provide a brief summary when done
+4. Match user's language (PT/EN)`;
 
     const messages: Message[] = [
       { role: "system", content: executorPrompt },
-      ...conversationHistory.slice(-4), // Keep some context but not too much
+      ...conversationHistory.slice(-4),
       { role: "user", content: task },
     ];
 
@@ -600,26 +898,93 @@ Use the available tools to complete this task. Be concise in your response.`;
       inputSchema: t.inputSchema,
     }));
 
-    for (let i = 0; i < (this.config.maxExecutorIterations || 5); i++) {
-      console.error(`[Agent] Executor iteration ${i + 1}/${this.config.maxExecutorIterations}`);
+    let successfulCreates = 0;
+    let lastSuccessfulCreate: string | null = null;
 
+    // Loop detection
+    let lastToolCall: string | null = null;
+    let consecutiveRepeats = 0;
+    const MAX_CONSECUTIVE_REPEATS = 3;
+
+    for (let i = 0; i < (this.config.maxExecutorIterations || 30); i++) {
       const result = await this.callLLM(model, messages, toolDefs);
 
       if (!result.toolCalls || result.toolCalls.length === 0) {
-        console.error(`[Agent] Executor: No tool calls, returning response`);
-        return result.text || "Task completed.";
+        // LLM finished - return its response
+        const response = result.text || "Task completed.";
+        this.sendProgress("✅ Done!");
+        return response;
       }
 
       // Execute tool calls
       for (const tc of result.toolCalls) {
+        // Loop detection: same tool called repeatedly
+        const callSignature = `${tc.name}:${JSON.stringify(tc.arguments)}`;
+        if (callSignature === lastToolCall) {
+          consecutiveRepeats++;
+          if (consecutiveRepeats >= MAX_CONSECUTIVE_REPEATS) {
+            console.error(`[SMART] ⚠️ Loop detected: ${tc.name} called ${consecutiveRepeats} times`);
+            this.sendProgress(`⚠️ Stopped (loop detected)`);
+            return `I got stuck in a loop calling ${tc.name}. The task may be partially complete.`;
+          }
+        } else {
+          consecutiveRepeats = 1;
+          lastToolCall = callSignature;
+        }
         const toolDef = tools.find((t) => t.name === tc.name);
         if (!toolDef) {
           messages.push({ role: "user", content: `[Tool Error]: Unknown tool ${tc.name}` });
           continue;
         }
 
-        console.error(`\n[Agent] Executor tool call: ${tc.name}`);
-        console.error(`[Agent] Args: ${JSON.stringify(tc.arguments, null, 2)}`);
+        // Format args for logging (compact, key names only for objects with many keys)
+        const argsStr = this.formatArgsForLog(tc.arguments);
+
+        // Get connection name for mesh tools
+        let toolLabel = tc.name;
+        if (toolDef.source === "mesh" && toolDef.connectionId) {
+          const cachedConns = await this.getConnections();
+          const conn = cachedConns.find((c) => c.id === toolDef.connectionId);
+          if (conn) {
+            toolLabel = `${conn.title}/${tc.name}`;
+          }
+        } else if (toolDef.source === "local") {
+          toolLabel = `local/${tc.name}`;
+        }
+        console.error(`[SMART] → ${toolLabel}(${argsStr})`);
+
+        // Track tool usage
+        this.trackToolUsed(tc.name);
+
+        // Send progress to UI
+        const shortName = tc.name.replace("COLLECTION_", "").replace("_", " ");
+        this.sendProgress(`⚡ ${shortName}...`);
+
+        // Validate required parameters
+        const schema = toolDef.inputSchema as {
+          required?: string[];
+          properties?: Record<string, unknown>;
+        };
+        const requiredParams = schema?.required || [];
+        const missingParams = requiredParams.filter(
+          (param) =>
+            !(param in tc.arguments) ||
+            tc.arguments[param] === undefined ||
+            tc.arguments[param] === "",
+        );
+
+        if (missingParams.length > 0) {
+          console.error(`[SMART] ✗ Missing: ${missingParams.join(", ")}`);
+          messages.push({
+            role: "assistant",
+            content: `Calling ${tc.name}...`,
+          });
+          messages.push({
+            role: "user",
+            content: `[Tool Error for ${tc.name}]:\nMissing required parameters: ${missingParams.join(", ")}.\nYou MUST provide these values. For CREATE operations, generate the actual content.`,
+          });
+          continue;
+        }
 
         let toolResult: unknown;
         const startTime = Date.now();
@@ -640,11 +1005,59 @@ Use the available tools to complete this task. Be concise in your response.`;
           }
 
           const duration = Date.now() - startTime;
-          console.error(`[Agent] ✓ ${tc.name} completed in ${duration}ms`);
-          console.error(`[Agent] Result: ${JSON.stringify(toolResult).slice(0, 500)}`);
+          const resultStr = this.formatResultForLog(toolResult);
+          console.error(`[SMART] ✓ ${toolLabel} (${duration}ms) → ${resultStr}`);
+
+          // Check if result contains an image - send it directly
+          if (toolResult && typeof toolResult === "object") {
+            const res = toolResult as Record<string, unknown>;
+            // Check for image data URL (from our mesh-client extraction)
+            if (res.image && typeof res.image === "string") {
+              const imageUrl = res.image as string;
+              console.error(
+                `[SMART] 🖼️ Image detected (${imageUrl.length} chars), sending directly`,
+              );
+              this.sendProgress(`🖼️ Image generated!`);
+
+              // Send image event to UI
+              if (this.config.sendEvent) {
+                this.config.sendEvent("image_generated", { imageUrl });
+              }
+
+              // Replace huge base64 with placeholder for LLM
+              (toolResult as Record<string, unknown>).image = "[IMAGE DATA - sent to user]";
+              (toolResult as Record<string, unknown>).imageSent = true;
+            }
+          }
+
+          // Track successful CREATE operations
+          if (tc.name.includes("CREATE") && toolResult && typeof toolResult === "object") {
+            const res = toolResult as Record<string, unknown>;
+            if (!res.error && (res.item || res.id || res.success)) {
+              successfulCreates++;
+              lastSuccessfulCreate = tc.name;
+              this.sendProgress(`✅ Created successfully!`);
+
+              // If we've done a CREATE, tell the LLM it's done
+              if (successfulCreates >= 1) {
+                messages.push({
+                  role: "assistant",
+                  content: `Calling ${tc.name}...`,
+                });
+                messages.push({
+                  role: "user",
+                  content: `[Tool Result for ${tc.name}]:\n${JSON.stringify(toolResult, null, 2).slice(0, 3000)}\n\n✅ SUCCESS! The task is complete. Please provide a brief summary to the user.`,
+                });
+                continue;
+              }
+            }
+          }
         } catch (error) {
           const duration = Date.now() - startTime;
-          console.error(`[Agent] ✗ ${tc.name} failed in ${duration}ms:`, error);
+          console.error(
+            `[SMART] ✗ ${tc.name} (${duration}ms): ${error instanceof Error ? error.message : "Error"}`,
+          );
+          this.sendProgress(`❌ ${tc.name} failed`);
           toolResult = { error: error instanceof Error ? error.message : "Tool execution failed" };
         }
 
@@ -659,7 +1072,11 @@ Use the available tools to complete this task. Be concise in your response.`;
       }
     }
 
-    return "Task execution reached iteration limit.";
+    this.sendProgress("⚠️ Reached iteration limit");
+    if (lastSuccessfulCreate) {
+      return `Task completed (${lastSuccessfulCreate} was successful), but the AI didn't provide a summary.`;
+    }
+    return "Task execution reached iteration limit without completing.";
   }
 
   /**
@@ -705,8 +1122,6 @@ Use the available tools to complete this task. Be concise in your response.`;
       temperature: this.config.temperature,
     };
 
-    console.error(`[Agent] Calling LLM: ${modelId} with ${toolsForLLM.length} tools`);
-
     const result = await callMeshTool<{
       content?: Array<{
         type: string;
@@ -741,7 +1156,7 @@ Use the available tools to complete this task. Be concise in your response.`;
           try {
             parsedArgs = JSON.parse(tc.input);
           } catch {
-            console.error(`[Agent] Failed to parse tool input`);
+            // Ignore parse errors - use empty args
           }
         } else {
           parsedArgs = tc.input;
@@ -752,8 +1167,6 @@ Use the available tools to complete this task. Be concise in your response.`;
         toolCalls.push({ name: tc.toolName, arguments: parsedArgs });
       }
     }
-
-    console.error(`[Agent] LLM response: text=${!!text}, toolCalls=${toolCalls.length}`);
 
     return { text, toolCalls };
   }

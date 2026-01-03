@@ -12,6 +12,9 @@ dist/
 # Logs
 *.log
 
+# Local data (tasks, cache, etc.)
+data/
+
 # IDE
 .idea/
 .vscode/

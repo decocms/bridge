@@ -8,6 +8,7 @@
 import type { Domain, DomainMessage, DomainContext, DomainTool } from "../../core/domain.ts";
 import { isMeshReady } from "../../core/mesh-client.ts";
 import { Agent, type LocalTool } from "../../core/agent.ts";
+import { getRecentTasks, getTaskSummary, getTask, type Task } from "../../core/task-manager.ts";
 import { spawn } from "bun";
 
 // ============================================================================
@@ -64,41 +65,21 @@ When user asks about "mesh", "tools", or "connections":
 const tools: DomainTool[] = [
   {
     name: "SAY_TEXT",
-    description:
-      "Make the Mac speak text out loud. Auto-detects language (Portuguese/English) and picks appropriate voice.",
+    description: "Make the Mac speak text out loud.",
     inputSchema: {
       type: "object",
       properties: {
         text: { type: "string", description: "Text to speak" },
-        voice: {
-          type: "string",
-          description:
-            "Voice override (optional). If not provided, auto-detects: 'Luciana' for Portuguese, 'Samantha' for English",
-        },
-        rate: {
-          type: "number",
-          description: "Speech rate (optional, words per minute, default ~175)",
-        },
       },
       required: ["text"],
     },
     execute: async (input, _ctx) => {
-      const { text, voice, rate } = input as { text: string; voice?: string; rate?: number };
+      const { text } = input as { text: string };
 
-      // Use Siri voice by default (multilingual), or fall back to language-specific voices
       const detectedLang = detectLanguage(text);
-      const selectedVoice = voice || DEFAULT_VOICE;
+      const args: string[] = ["-v", DEFAULT_VOICE, text];
 
-      // Build the say command arguments
-      const args: string[] = ["-v", selectedVoice];
-
-      if (rate) {
-        args.push("-r", String(rate));
-      }
-
-      args.push(text);
-
-      console.error(`[SAY_TEXT] Speaking with voice ${selectedVoice} (lang: ${detectedLang})`);
+      console.error(`[SAY_TEXT] Speaking (lang: ${detectedLang})`);
 
       try {
         const proc = spawn(["say", ...args], {
@@ -111,8 +92,6 @@ const tools: DomainTool[] = [
         return {
           success: true,
           message: `Spoke: "${text.slice(0, 50)}${text.length > 50 ? "..." : ""}"`,
-          voice: selectedVoice,
-          detectedLanguage: detectedLang,
         };
       } catch (error) {
         return {
@@ -646,6 +625,81 @@ const tools: DomainTool[] = [
       }
     },
   },
+  // =========================================================================
+  // Task History Tools
+  // =========================================================================
+  {
+    name: "LIST_TASKS",
+    description:
+      "List recent tasks with their status. Shows what the user has asked for and whether it completed, failed, or is in progress.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "How many tasks to return (default: 10, max: 50)",
+        },
+        status: {
+          type: "string",
+          enum: ["pending", "in_progress", "completed", "error"],
+          description: "Filter by status (optional)",
+        },
+      },
+    },
+    execute: async (input, _ctx) => {
+      const { limit = 10 } = input as { limit?: number; status?: string };
+      const tasks = await getRecentTasks(Math.min(limit, 50));
+
+      return {
+        tasks: tasks.map((t: Task) => ({
+          id: t.id,
+          status: t.status,
+          message: t.userMessage.slice(0, 100),
+          toolsUsed: t.toolsUsed.slice(0, 5),
+          progress: t.progress.slice(-3),
+          durationMs: t.durationMs,
+          error: t.error,
+          createdAt: t.createdAt,
+        })),
+        count: tasks.length,
+      };
+    },
+  },
+  {
+    name: "TASK_SUMMARY",
+    description: "Get a summary of task history: total counts, recent tasks, success/error rates.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+    execute: async (_input, _ctx) => {
+      return await getTaskSummary();
+    },
+  },
+  {
+    name: "GET_TASK",
+    description: "Get full details of a specific task by ID, including all progress updates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description: "The task ID to retrieve",
+        },
+      },
+      required: ["taskId"],
+    },
+    execute: async (input, _ctx) => {
+      const { taskId } = input as { taskId: string };
+      const task = await getTask(taskId);
+
+      if (!task) {
+        return { error: `Task not found: ${taskId}` };
+      }
+
+      return task;
+    },
+  },
 ];
 
 // ============================================================================
@@ -820,9 +874,12 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
     return;
   }
 
-  // Strip the command prefix (! or /) for display, keep for command detection
+  // Command prefix detection:
+  // - `/` = shortcuts only (/say, /files, /tasks, etc.)
+  // - `!` or `-` = AI commands
   let messageText = message.text.trim();
-  const hasPrefix = messageText.startsWith("!") || messageText.startsWith("/");
+  const hasPrefix =
+    messageText.startsWith("!") || messageText.startsWith("-") || messageText.startsWith("/");
 
   console.error(
     `[whatsapp] Received message: "${messageText.slice(0, 100)}" (hasPrefix: ${hasPrefix})`,
@@ -840,24 +897,12 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
   session.lastProcessedMessage = messageKey;
 
   // Check for /say command (direct command from user)
-  // Match: /say text OR /say:voice text
-  const sayMatch = messageText.match(/^\/say(?::(\w+))?\s+(.+)$/is);
+  const sayMatch = messageText.match(/^\/say\s+(.+)$/is);
   console.error(`[whatsapp] /say match:`, sayMatch ? "YES" : "NO");
   if (sayMatch) {
-    const voice = sayMatch[1] || undefined;
-    const textToSay = sayMatch[2];
-    console.error(`[whatsapp] Executing say: voice=${voice}, text="${textToSay.slice(0, 50)}"`);
+    const textToSay = sayMatch[1];
+    console.error(`[whatsapp] Executing say: "${textToSay.slice(0, 50)}"`);
 
-    await executeSay(textToSay, voice, message, send, aiPrefix);
-    return;
-  }
-
-  // Check for natural "say" requests (e.g., "!diga ola", "!fale hello", "!say hi")
-  const naturalSayMatch = messageText.match(/^[!/]?(?:diga|fale|say|speak|fala)\s+(.+)$/is);
-  console.error(`[whatsapp] natural say match:`, naturalSayMatch ? "YES" : "NO");
-  if (naturalSayMatch) {
-    const textToSay = naturalSayMatch[1];
-    console.error(`[whatsapp] Executing natural say: "${textToSay.slice(0, 50)}"`);
     await executeSay(textToSay, undefined, message, send, aiPrefix);
     return;
   }
@@ -865,6 +910,44 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
   // ===========================================================================
   // Shortcut Commands
   // ===========================================================================
+
+  // /tasks - Show recent task history
+  if (messageText.match(/^\/tasks?\s*$/i)) {
+    try {
+      const summary = await getTaskSummary();
+      const statusEmoji = (status: string) => {
+        switch (status) {
+          case "completed":
+            return "✅";
+          case "error":
+            return "❌";
+          case "in_progress":
+            return "⏳";
+          default:
+            return "📋";
+        }
+      };
+
+      const taskLines = summary.recentTasks
+        .map((t) => `${statusEmoji(t.status)} ${t.message} _(${t.age})_`)
+        .join("\n");
+
+      send({
+        type: "send",
+        id: message.id,
+        chatId: message.chatId,
+        text: `${aiPrefix}*Task History*\n\n📊 *Stats:* ${summary.completed} completed, ${summary.error} errors, ${summary.inProgress} in progress\n\n*Recent:*\n${taskLines || "_No tasks yet_"}`,
+      });
+    } catch (error) {
+      send({
+        type: "send",
+        id: message.id,
+        chatId: message.chatId,
+        text: `${aiPrefix}❌ Failed to load tasks: ${error instanceof Error ? error.message : "Unknown error"}`,
+      });
+    }
+    return;
+  }
 
   // /apps - List running applications
   if (messageText.match(/^\/apps?\s*$/i)) {
@@ -900,21 +983,31 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
     return;
   }
 
-  // /files [path] - List files
+  // /files [path] - List files (relative to ~/Projects/)
   const filesMatch = messageText.match(/^\/files?\s*(.*)?$/i);
   if (filesMatch) {
-    const path = filesMatch[1]?.trim() || "/Users/guilherme/Projects/";
-    const allowedPaths = ["/Users/guilherme/Projects/"];
-    const isAllowed = allowedPaths.some((a) => path.startsWith(a));
+    const basePath = "/Users/guilherme/Projects/";
+    let inputPath = filesMatch[1]?.trim() || "";
 
-    if (!isAllowed) {
-      send({
-        type: "send",
-        id: message.id,
-        chatId: message.chatId,
-        text: `${aiPrefix}❌ Path not allowed. Use ~/Projects/`,
-      });
-      return;
+    // Handle relative paths - prepend base if not absolute
+    let path: string;
+    if (!inputPath) {
+      path = basePath;
+    } else if (inputPath.startsWith("/")) {
+      // Absolute path - must be within allowed
+      if (!inputPath.startsWith(basePath)) {
+        send({
+          type: "send",
+          id: message.id,
+          chatId: message.chatId,
+          text: `${aiPrefix}❌ Path not allowed. Use paths within ~/Projects/`,
+        });
+        return;
+      }
+      path = inputPath;
+    } else {
+      // Relative path - prepend base
+      path = basePath + inputPath;
     }
 
     try {
@@ -940,21 +1033,29 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
     return;
   }
 
-  // /read <file> - Read file
+  // /read <file> - Read file (relative to ~/Projects/)
   const readMatch = messageText.match(/^\/read\s+(.+)$/i);
   if (readMatch) {
-    const filePath = readMatch[1].trim();
-    const allowedPaths = ["/Users/guilherme/Projects/"];
-    const isAllowed = allowedPaths.some((a) => filePath.startsWith(a));
+    const basePath = "/Users/guilherme/Projects/";
+    const inputPath = readMatch[1].trim();
 
-    if (!isAllowed) {
-      send({
-        type: "send",
-        id: message.id,
-        chatId: message.chatId,
-        text: `${aiPrefix}❌ Path not allowed`,
-      });
-      return;
+    // Handle relative paths - prepend base if not absolute
+    let filePath: string;
+    if (inputPath.startsWith("/")) {
+      // Absolute path - must be within allowed
+      if (!inputPath.startsWith(basePath)) {
+        send({
+          type: "send",
+          id: message.id,
+          chatId: message.chatId,
+          text: `${aiPrefix}❌ Path not allowed. Use paths within ~/Projects/`,
+        });
+        return;
+      }
+      filePath = inputPath;
+    } else {
+      // Relative path - prepend base
+      filePath = basePath + inputPath;
     }
 
     try {
@@ -1086,24 +1187,24 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
       text: `${aiPrefix}*Available Commands:*
 
 📢 \`/say <text>\` - Speak aloud
-📢 \`/say:Voice <text>\` - Speak with specific voice
 
-📁 \`/files [path]\` - List files
-📄 \`/read <file>\` - Read file
+📁 \`/files [path]\` - List files (relative to ~/Projects/)
+📄 \`/read <file>\` - Read file (relative to ~/Projects/)
 🖥️ \`/apps\` - Running apps
 ⚙️ \`/run <cmd>\` - Run command
 
 🔧 \`/tools\` - List Mesh tools
+📋 \`/tasks\` - Task history
 🔔 \`/notify <msg>\` - Send notification
 
-💬 \`!message\` - Chat with AI`,
+💬 \`!message\` or \`-message\` - Chat with AI`,
     });
     return;
   }
 
-  // Strip the ! prefix for LLM (it's just a trigger, not part of the message)
+  // Strip the command prefix (! or -) for LLM - it's just a trigger
   let userMessage = messageText;
-  if (userMessage.startsWith("!")) {
+  if (userMessage.startsWith("!") || userMessage.startsWith("-")) {
     userMessage = userMessage.slice(1).trim();
   }
 
@@ -1137,14 +1238,34 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
     smartModel: config.smartModel, // Optional - uses fastModel if not set
     maxTokens: 2048,
     temperature: 0.7,
-    maxRouterIterations: 3,
-    maxExecutorIterations: 5,
+    maxRouterIterations: 10,
+    maxExecutorIterations: 30,
     onModeChange: (mode) => {
       // Notify the extension UI about mode changes
       send({
         type: "agent_mode_changed",
         mode,
       } as any);
+    },
+    onProgress: (message) => {
+      // Send progress updates to the UI
+      send({
+        type: "agent_progress",
+        message,
+      } as any);
+    },
+    sendEvent: (event, data) => {
+      // Handle special events like image generation
+      if (event === "image_generated" && data.imageUrl) {
+        console.error(`[whatsapp] 🖼️ Sending generated image to chat`);
+        send({
+          type: "send_image",
+          id: message.id,
+          chatId: message.chatId,
+          imageUrl: data.imageUrl as string,
+          caption: "",
+        } as any);
+      }
     },
   });
 
@@ -1193,13 +1314,67 @@ The Mesh Bridge needs to receive credentials from MCP Mesh.
       responseText = `${aiPrefix}${responseText}`;
     }
 
-    // Send response
+    // Detect image URLs in response and send them separately
+    // Match URLs ending in image extensions (with optional query string)
+    // Also match markdown image syntax: ![alt](url)
+    // Also match base64 data URLs from image generation
+    const imageUrlPattern =
+      /https?:\/\/[^\s\)\"\']+\.(?:png|jpg|jpeg|gif|webp)(?:\?[^\s\)\"\']*)?/gi;
+    const markdownImagePattern = /!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/gi;
+    const dataUrlPattern = /data:image\/(?:png|jpg|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+/gi;
+
+    // First extract from markdown syntax
+    const markdownMatches = [...responseText.matchAll(markdownImagePattern)];
+    const imageUrls: string[] = [];
+
+    for (const match of markdownMatches) {
+      imageUrls.push(match[2]); // The URL is in capture group 2
+    }
+
+    // Then find bare URLs
+    const bareUrls = responseText.match(imageUrlPattern) || [];
+    for (const url of bareUrls) {
+      if (!imageUrls.includes(url)) {
+        imageUrls.push(url);
+      }
+    }
+
+    // Also check for base64 data URLs (from image generation)
+    const dataUrls = responseText.match(dataUrlPattern) || [];
+    for (const url of dataUrls) {
+      if (!imageUrls.includes(url)) {
+        imageUrls.push(url);
+        console.error(`[whatsapp] Found base64 data URL image (${url.length} chars)`);
+      }
+    }
+
+    console.error(`[whatsapp] Found ${imageUrls.length} image URLs in response`);
+
+    // Send text response first (with the URL visible)
     send({
       type: "send",
       id: message.id,
       chatId: message.chatId,
       text: responseText,
     });
+
+    // Then send images as actual images
+    for (const imageUrl of imageUrls) {
+      // Wait a bit for text to be sent
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      console.error(`[whatsapp] Sending image: ${imageUrl.slice(0, 80)}...`);
+      send({
+        type: "send_image",
+        id: message.id,
+        chatId: message.chatId,
+        imageUrl,
+        caption: "",
+      } as any);
+
+      // Wait for image to be sent before next
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
 
     // If speaker mode is ON (from session OR message flag), also speak the response
     const speakerEnabled = session.speakerMode === true || message.speakerMode === true;
