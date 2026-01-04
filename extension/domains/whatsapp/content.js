@@ -1098,20 +1098,7 @@ function isAIResponse(text) {
   return trimmed.startsWith("🤖");
 }
 
-/**
- * Check if a message is a local shortcut command.
- * These are handled natively by the bridge without AI.
- */
-function isLocalShortcut(text) {
-  const trimmed = text.trim().toLowerCase();
-  return trimmed.startsWith("/say ") || 
-         trimmed.startsWith("/files") || 
-         trimmed.startsWith("/read ") ||
-         trimmed.startsWith("/apps") ||
-         trimmed.startsWith("/run ") ||
-         trimmed.startsWith("/notify ") ||
-         trimmed === "/help";
-}
+// No local shortcuts - all commands go through Pilot via events
 
 /**
  * Check if a message should be processed by the bridge.
