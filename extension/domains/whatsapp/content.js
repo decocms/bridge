@@ -120,14 +120,24 @@ function handleBridgeFrame(frame) {
 
   switch (frame.type) {
     case "connected":
+      // Set connection state first - this is critical
       sessionId = frame.sessionId;
       bridgeConnected = true;
-      updateStatusUI("connected");
+      
+      // Clear reconnect interval
       if (reconnectInterval) {
         clearInterval(reconnectInterval);
         reconnectInterval = null;
       }
+      
       debug("Connected! Session:", sessionId, "Domain:", frame.domain);
+      
+      // Update UI (non-critical, might fail if badge not created yet)
+      try {
+        updateStatusUI("connected");
+      } catch (e) {
+        debug("Failed to update status UI:", e.message);
+      }
       
       // Sync speaker mode with server
       sendFrame({
@@ -191,6 +201,21 @@ function handleBridgeFrame(frame) {
         }
       }
       aiResponsePending = false;
+      break;
+
+    case "error":
+      // Error from bridge
+      debug("Bridge error:", frame.code, frame.message);
+      if (frame.code === "credentials_stale") {
+        // Bridge is restarting due to stale credentials
+        // Force disconnect and wait for new bridge
+        updateStatusUI("reconnecting");
+        bridgeConnected = false;
+        sessionId = null;
+        if (bridgeSocket) {
+          bridgeSocket.close();
+        }
+      }
       break;
 
     case "pong":
@@ -342,24 +367,47 @@ function createStatusBadge() {
       chrome.storage.local.set({ meshBridgeEnabled: extensionEnabled });
     }
     
-    // Toggle observer
+    // Connect/disconnect and toggle observer
     if (!extensionEnabled) {
       stopMessageObserver();
-    } else if (isSelfChat()) {
-      startMessageObserver();
+      // Disconnect WebSocket when disabled
+      if (bridgeSocket) {
+        bridgeSocket.close();
+        bridgeSocket = null;
+        bridgeConnected = false;
+        sessionId = null;
+      }
+      // Clear reconnect interval
+      if (reconnectInterval) {
+        clearInterval(reconnectInterval);
+        reconnectInterval = null;
+      }
+    } else {
+      // Connect to bridge when enabled
+      connectToBridge();
+      startWhatsAppSetup();
     }
   });
 
-  // Load persisted state
+  // Load persisted state and connect if enabled
   if (typeof chrome !== "undefined" && chrome.storage) {
     chrome.storage.local.get(["meshBridgeEnabled"], (result) => {
       if (result.meshBridgeEnabled === false) {
         extensionEnabled = false;
         badgeEl.classList.add("disabled");
         badgeEl.title = "Mesh Bridge DISABLED (click to enable)";
-        debug("Extension disabled from storage");
+        debug("Extension disabled from storage - not connecting");
+      } else {
+        // Extension is enabled, connect to bridge
+        debug("Extension enabled, connecting to bridge...");
+        connectToBridge();
+        startWhatsAppSetup();
       }
     });
+  } else {
+    // No chrome.storage (dev mode), connect immediately
+    connectToBridge();
+    startWhatsAppSetup();
   }
 }
 
@@ -394,22 +442,33 @@ function updateEnableToggle() {
 
 function updateStatusUI(status) {
   const badgeContainer = document.getElementById("mesh-bridge-badge");
-  if (!badgeContainer) return;
+  if (!badgeContainer) {
+    // Badge not created yet, will be updated when it's created
+    return;
+  }
 
-  const text = badgeContainer.querySelector(".status-text");
-
+  // Update badge classes for status (this controls the color)
   if (status === "connected") {
     badgeContainer.classList.add("connected");
     badgeContainer.classList.remove("reconnecting");
-    text.textContent = "Bridge";
   } else if (status === "reconnecting") {
     badgeContainer.classList.remove("connected");
     badgeContainer.classList.add("reconnecting");
-    text.textContent = "Reconnecting...";
   } else {
     badgeContainer.classList.remove("connected");
     badgeContainer.classList.remove("reconnecting");
-    text.textContent = "Bridge ⚠️";
+  }
+
+  // Update text if element exists (optional, badge is now just a dot)
+  const text = badgeContainer.querySelector(".status-text");
+  if (text) {
+    if (status === "connected") {
+      text.textContent = "Bridge";
+    } else if (status === "reconnecting") {
+      text.textContent = "Reconnecting...";
+    } else {
+      text.textContent = "Bridge ⚠️";
+    }
   }
 }
 
@@ -1026,16 +1085,30 @@ function init() {
         
         if (!extensionEnabled) {
           stopMessageObserver();
-        } else if (isSelfChat()) {
-          startMessageObserver();
+          // Disconnect WebSocket when disabled
+          if (bridgeSocket) {
+            bridgeSocket.close();
+            bridgeSocket = null;
+            bridgeConnected = false;
+          }
+        } else {
+          // Connect to bridge when enabled
+          connectToBridge();
+          startWhatsAppSetup();
         }
       }
     });
   }
 
-  // Connect to bridge
-  connectToBridge();
+  // Connection and setup happens in createStatusBadge after checking enabled state
 
+  debug("WhatsApp domain initialized");
+}
+
+/**
+ * Start WhatsApp-specific setup (called after connecting when enabled)
+ */
+function startWhatsAppSetup() {
   // Wait for WhatsApp to fully load, then set up
   setTimeout(() => {
     // Try to auto-click self-chat if no chat is open

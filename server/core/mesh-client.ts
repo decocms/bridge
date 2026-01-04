@@ -266,8 +266,14 @@ export async function callMeshTool<T = unknown>(
     const text = await response.text();
     console.error(`[Mesh] ✗ ${toolName}: ${response.status} - ${text.slice(0, 100)}`);
 
-    if (response.status === 401) {
-      throw new Error(`Token expired (401). Restart mesh connection to get fresh credentials.`);
+    // On auth errors, exit process so Mesh respawns with fresh credentials
+    // This handles HMR/restart scenarios where old process has stale token
+    if (response.status === 401 || response.status === 403) {
+      console.error(`[mesh-bridge] ⚠️ Auth error (${response.status}). Credentials are stale.`);
+      console.error(`[mesh-bridge] Exiting to allow Mesh to respawn with fresh credentials...`);
+      // Use setTimeout to allow logs to flush
+      setTimeout(() => process.exit(1), 100);
+      throw new Error(`Auth error (${response.status}). Process will restart.`);
     }
 
     throw new Error(`Mesh API error (${response.status}): ${text}`);

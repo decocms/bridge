@@ -237,7 +237,20 @@ async function handleConnect(
   if (!meshStatus) {
     try {
       meshStatus = await checkMeshAvailability();
-    } catch {
+    } catch (error) {
+      // If auth error, credentials are stale - send error and exit
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (errMsg.includes("Auth error") || errMsg.includes("401") || errMsg.includes("403")) {
+        send(ws, {
+          type: "error",
+          id: "connect",
+          code: "credentials_stale",
+          message: "Bridge has stale credentials. Restarting...",
+        });
+        console.error("[mesh-bridge] Stale credentials detected on connect. Exiting...");
+        setTimeout(() => process.exit(1), 100);
+        return;
+      }
       // This is expected on first connection before ON_MCP_CONFIGURATION is called
       meshStatus = { available: false, hasLLM: false, tools: [] };
     }
@@ -250,15 +263,20 @@ async function handleConnect(
   }
 
   // Send connected response
-  send(ws, {
-    type: "connected",
+  const connectedFrame = {
+    type: "connected" as const,
     sessionId: session.id,
+    bridgeVersion: BRIDGE_VERSION,
     domain: domainId,
     mesh: {
       available: meshStatus?.available ?? false,
+      hasLLM: meshStatus?.hasLLM ?? false,
       tools: meshStatus?.tools ?? [],
     },
-  });
+    domains: getAllDomains().map((d) => ({ id: d.id, name: d.name })),
+  };
+  console.error(`[mesh-bridge] Sending connected frame to ${session.id}`);
+  send(ws, connectedFrame);
 
   // Debug: Log detailed state when browser extension connects
   const eventBusId = getEventBusBindingId();
