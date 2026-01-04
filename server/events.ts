@@ -12,7 +12,6 @@
 export const EVENT_TYPES = {
   // Outgoing (Bridge publishes)
   USER_MESSAGE: "user.message.received",
-  USER_COMMAND: "user.command.issued",
 
   // Incoming (Bridge subscribes to)
   TASK_CREATED: "agent.task.created",

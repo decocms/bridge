@@ -9,7 +9,6 @@ describe("Event Types", () => {
   describe("EVENT_TYPES", () => {
     it("has correct user event types", () => {
       expect(EVENT_TYPES.USER_MESSAGE).toBe("user.message.received");
-      expect(EVENT_TYPES.USER_COMMAND).toBe("user.command.issued");
     });
 
     it("has correct task event types", () => {
