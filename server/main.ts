@@ -48,20 +48,27 @@ const server = startWebSocketServer(config.wsPort);
 
 // Banner
 const domains = getAllDomains();
-console.log(`
+
+if (server) {
+  console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║               MESH BRIDGE v${BRIDGE_VERSION} (Standalone)                 ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  WebSocket: ws://localhost:${server.port}                            ║
 ║  Mesh:      ${config.mesh.url.padEnd(42)}║
 ║  Domains:   ${domains
-  .map((d) => d.id)
-  .join(", ")
-  .padEnd(42)}║
+    .map((d) => d.id)
+    .join(", ")
+    .padEnd(42)}║
 ║                                                              ║
 ║  Waiting for extension connection...                         ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
+} else {
+  console.log(`[mesh-bridge] Port ${config.wsPort} already in use (another instance running)`);
+  // Don't exit with error - allow the process to complete for tool discovery scenarios
+  // This happens when mesh spawns for "tool fetch" while another instance is running
+}
 
 // Check mesh availability in background (quick check, tools loaded lazily on first message)
 setTimeout(async () => {

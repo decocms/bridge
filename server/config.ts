@@ -5,6 +5,10 @@
  * - MESH_TOKEN: JWT token for mesh API calls
  * - MESH_URL: Base URL of the mesh instance
  * - MESH_STATE: JSON-encoded state with binding values
+ * - MESH_CONNECTION_ID: Our connection ID (for event subscriptions)
+ *
+ * Note: Bridge doesn't do AI processing - that's handled by Pilot.
+ * Bridge just routes messages between browser extensions and the event bus.
  */
 
 export const config = {
@@ -14,15 +18,9 @@ export const config = {
   // MCP Mesh connection
   mesh: {
     url: process.env.MESH_URL || "http://localhost:3000",
-    apiKey: process.env.MESH_API_KEY || null,
-    defaultModel: process.env.DEFAULT_MODEL || "google/gemini-2.5-flash",
-    /** Fast model for routing - cheap and quick */
-    fastModel: process.env.FAST_MODEL || process.env.DEFAULT_MODEL || "google/gemini-2.5-flash",
-    /** Smart model for complex execution - optional, defaults to fastModel */
-    smartModel: process.env.SMART_MODEL || undefined,
   },
 
-  // Terminal safety
+  // Terminal safety (for direct commands, not AI)
   terminal: {
     allowedPaths: (process.env.ALLOWED_PATHS || "").split(",").filter(Boolean),
     blockedCommands: (process.env.BLOCKED_COMMANDS || "rm -rf,sudo,chmod 777")
@@ -40,11 +38,7 @@ export const config = {
 
 export function validateConfig(): void {
   console.log(`[mesh-bridge] Mesh URL: ${config.mesh.url}`);
-  console.log(`[mesh-bridge] Fast model (router): ${config.mesh.fastModel}`);
-  console.log(
-    `[mesh-bridge] Smart model (executor): ${config.mesh.smartModel || "(same as fast)"}`,
-  );
-  console.log(`[mesh-bridge] Default model: ${config.mesh.defaultModel}`);
+  console.log(`[mesh-bridge] Connection ID: ${process.env.MESH_CONNECTION_ID || "(not set)"}`);
 
   if (config.terminal.allowedPaths.length === 0) {
     console.log("[mesh-bridge] Note: ALLOWED_PATHS not set. Terminal commands will be disabled.");

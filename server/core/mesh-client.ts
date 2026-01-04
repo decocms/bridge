@@ -76,32 +76,90 @@ export function getMeshUrl(): string {
 
 /**
  * Get the authorization token for mesh calls.
- * Priority: MESH_REQUEST_CONTEXT > MESH_API_KEY env var
+ * Priority: Fresh env var > cached context > config
+ * Fresh env check handles hot reload case where token is regenerated
  */
 function getAuthToken(): string | undefined {
-  // If running inside mesh, use the provided context
+  // Always check fresh env var first (handles hot reload)
+  const freshToken = process.env.MESH_TOKEN;
+  if (freshToken) {
+    // Update cache
+    if (meshRequestContext) {
+      meshRequestContext.authorization = freshToken;
+    }
+    return freshToken;
+  }
+
+  // Fall back to cached context
   if (meshRequestContext?.authorization) {
     return meshRequestContext.authorization;
   }
 
-  // Fall back to env var for standalone mode
+  // Fall back to config for standalone mode
   return config.mesh.apiKey || undefined;
 }
 
 /**
  * Check if mesh is ready (has received configuration from mesh)
+ * Also refreshes from env vars if context is stale
  */
 export function isMeshReady(): boolean {
+  // Try to refresh from env if context is missing
+  if (!meshRequestContext?.authorization) {
+    const token = process.env.MESH_TOKEN;
+    const state = process.env.MESH_STATE;
+    if (token && state) {
+      try {
+        meshRequestContext = {
+          authorization: token,
+          meshUrl: process.env.MESH_URL,
+          state: JSON.parse(state),
+        };
+      } catch {
+        // Ignore parse errors
+      }
+    }
+  }
   return meshRequestContext !== null && !!meshRequestContext.authorization;
 }
 
 /**
  * Get a binding connection ID from state by name
+ * Checks both cached context AND fresh env vars (in case of hot reload)
  */
 function getBindingConnectionId(bindingName: string): string | undefined {
-  if (!meshRequestContext?.state) return undefined;
-  const binding = meshRequestContext.state[bindingName] as BindingValue | undefined;
-  return binding?.value;
+  // First try cached context
+  if (meshRequestContext?.state) {
+    const binding = meshRequestContext.state[bindingName] as BindingValue | undefined;
+    if (binding?.value) return binding.value;
+  }
+
+  // Fallback: try fresh env vars (handles hot reload case)
+  const freshState = process.env.MESH_STATE;
+  if (freshState) {
+    try {
+      const parsed = JSON.parse(freshState);
+      const binding = parsed[bindingName] as BindingValue | undefined;
+      if (binding?.value) {
+        // Update cached context with fresh values
+        if (!meshRequestContext) {
+          meshRequestContext = {
+            authorization: process.env.MESH_TOKEN,
+            meshUrl: process.env.MESH_URL,
+            state: parsed,
+          };
+        } else {
+          meshRequestContext.state = parsed;
+          meshRequestContext.authorization = process.env.MESH_TOKEN;
+        }
+        return binding.value;
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  return undefined;
 }
 
 /**

@@ -30,12 +30,6 @@ export interface DomainConfig {
   settings?: Record<string, unknown>;
   /** AI prefix for responses */
   aiPrefix?: string;
-  /** Default LLM model */
-  defaultModel?: string;
-  /** Fast model for routing (cheap/quick) */
-  fastModel?: string;
-  /** Smart model for complex execution (optional) */
-  smartModel?: string;
 }
 
 export interface DomainMessage {

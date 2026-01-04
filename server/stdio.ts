@@ -26,7 +26,12 @@ import { config } from "./config.ts";
 import { registerDomain, getAllDomains } from "./core/domain.ts";
 
 // Import the WebSocket server starter
-import { startWebSocketServer, resetMeshStatus } from "./websocket.ts";
+import {
+  startWebSocketServer,
+  stopWebSocketServer,
+  resetMeshStatus,
+  handleIncomingEvents,
+} from "./websocket.ts";
 
 // Import domains
 import { whatsappDomain } from "./domains/whatsapp/index.ts";
@@ -51,30 +56,20 @@ const BindingOf = (bindingType: string) =>
  * State schema for stdio mode bindings.
  * Defines what bindings we need from the mesh UI.
  *
- * Based on how mcp-studio does it:
- * - LLM: For AI responses (@deco/openrouter)
- * - CONNECTION: For listing/calling tools from other MCPs (@deco/connection)
- * - DATABASE: For SQL queries (@deco/postgres) - optional
- * - EVENT_BUS: For pub/sub events (@deco/event-bus) - optional
+ * Bridge only needs EVENT_BUS for:
+ * - Publishing user messages to Pilot
+ * - Receiving agent responses from Pilot
+ *
+ * Pilot handles all LLM/Connection/Tool logic.
  */
 const StdioStateSchema = z.object({
-  LLM: BindingOf("@deco/openrouter").describe("LLM for AI responses"),
-  CONNECTION: BindingOf("@deco/connection").describe("Access to other MCP connections"),
-  DATABASE: BindingOf("@deco/postgres").optional().describe("Database for SQL queries (optional)"),
-  EVENT_BUS: BindingOf("@deco/event-bus").optional().describe("Event bus for pub/sub (optional)"),
+  EVENT_BUS: BindingOf("@deco/event-bus").describe("Event bus for pub/sub with Pilot agent"),
 });
 
 /**
  * Scopes we require - what tools we need from the bindings
  */
-const requiredScopes = [
-  "LLM::LLM_DO_GENERATE",
-  "LLM::COLLECTION_LLM_LIST",
-  "CONNECTION::COLLECTION_CONNECTIONS_LIST",
-  "CONNECTION::COLLECTION_CONNECTIONS_GET",
-  "DATABASE::DATABASES_RUN_SQL",
-  "EVENT_BUS::*",
-];
+const requiredScopes = ["EVENT_BUS::*"];
 
 // ============================================================================
 // Tool Logging Helper
@@ -88,16 +83,24 @@ function logTool(name: string, args: Record<string, unknown>) {
 }
 
 async function main() {
+  const processId = `${process.pid}`;
+  console.error(`[mesh-bridge] Starting process ${processId}`);
+
   // Read mesh credentials from env vars (passed by mesh when spawning STDIO process)
   const meshToken = process.env.MESH_TOKEN;
   const meshUrl = process.env.MESH_URL;
   const meshStateJson = process.env.MESH_STATE;
+
+  console.error(
+    `[mesh-bridge] Env vars: MESH_TOKEN=${meshToken ? "set" : "not set"}, MESH_URL=${meshUrl || "not set"}, MESH_STATE=${meshStateJson ? `${meshStateJson.length} chars` : "not set"}`,
+  );
 
   // Parse state from JSON env var
   let meshState: Record<string, unknown> = {};
   if (meshStateJson) {
     try {
       meshState = JSON.parse(meshStateJson);
+      console.error(`[mesh-bridge] Parsed MESH_STATE keys: ${Object.keys(meshState).join(", ")}`);
     } catch (e) {
       console.error("[mesh-bridge] Failed to parse MESH_STATE:", e);
     }
@@ -111,12 +114,17 @@ async function main() {
       meshUrl: meshUrl,
     });
     console.error(`[mesh-bridge] ✅ Mesh context from env vars: ${meshUrl}`);
-    const llmBinding = meshState.LLM as { value?: string } | undefined;
-    if (llmBinding?.value) {
-      console.error(`[mesh-bridge] ✅ LLM binding: ${llmBinding.value}`);
+    const eventBusBinding = meshState.EVENT_BUS as { value?: string } | undefined;
+    if (eventBusBinding?.value) {
+      console.error(`[mesh-bridge] ✅ EVENT_BUS binding: ${eventBusBinding.value}`);
+    } else {
+      console.error(`[mesh-bridge] ⚠️ EVENT_BUS binding not found in state`);
+      console.error(`[mesh-bridge] State keys: ${Object.keys(meshState).join(", ")}`);
     }
   } else {
     console.error("[mesh-bridge] ⚠️ No MESH_TOKEN/MESH_URL - running without mesh access");
+    console.error(`[mesh-bridge]   MESH_TOKEN: ${meshToken ? "set" : "not set"}`);
+    console.error(`[mesh-bridge]   MESH_URL: ${meshUrl || "not set"}`);
   }
 
   // Register domains
@@ -139,7 +147,7 @@ async function main() {
       title: "MCP Configuration",
       description:
         "Returns the configuration schema for this MCP server. Used by Mesh to show the bindings UI.",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     async () => {
@@ -164,6 +172,53 @@ async function main() {
   // Note: ON_MCP_CONFIGURATION is no longer needed - mesh passes credentials via env vars
   // The MCP_CONFIGURATION tool above is still needed for the bindings UI
 
+  // =========================================================================
+  // ON_EVENTS - Receive events from mesh event bus
+  // =========================================================================
+
+  server.registerTool(
+    "ON_EVENTS",
+    {
+      title: "Receive Events",
+      description:
+        "Receive CloudEvents from the mesh event bus. Used for agent responses and progress updates.",
+      inputSchema: z.object({
+        events: z.array(
+          z.object({
+            id: z.string(),
+            type: z.string(),
+            source: z.string(),
+            time: z.string().optional(),
+            data: z.any(),
+          }),
+        ),
+      }),
+    },
+    async (args) => {
+      const { events } = args;
+      // Log immediately with flush to ensure visibility
+      const eventTypes = events.map((e: { type: string }) => e.type);
+      console.error(
+        `[mesh-bridge] ON_EVENTS RECEIVED: ${events.length} events, types: [${eventTypes.join(", ")}]`,
+      );
+
+      try {
+        const results = await handleIncomingEvents(events);
+        console.error(`[mesh-bridge] ON_EVENTS COMPLETE: ${JSON.stringify(results).slice(0, 200)}`);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ results }) }],
+          structuredContent: { results },
+        };
+      } catch (error) {
+        console.error(`[mesh-bridge] ON_EVENTS ERROR: ${error}`);
+        return {
+          content: [{ type: "text", text: JSON.stringify({ error: String(error) }) }],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // Register domain-specific tools
   // Note: These tools require a WebSocket session context to work properly.
   // When called via STDIO without a session, they return a "no session" error.
@@ -176,7 +231,7 @@ async function main() {
           {
             title: tool.name,
             description: tool.description,
-            inputSchema: tool.inputSchema || {},
+            inputSchema: z.object({}), // Domain tools need session context anyway
           },
           async (args) => {
             logTool(tool.name, args as Record<string, unknown>);
@@ -203,6 +258,7 @@ async function main() {
   // Log registered tools
   console.error("[mesh-bridge] Registered tools:");
   console.error("  - MCP_CONFIGURATION");
+  console.error("  - ON_EVENTS");
   domains.forEach((domain) => {
     domain.tools?.forEach((tool) => {
       console.error(`  - ${tool.name}`);
