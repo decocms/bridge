@@ -112,15 +112,16 @@ const messageQueue = {
     if (!msg) return false;
     const m = msg.toLowerCase();
     
-    // Phase changes (FAST: Thinking/Done, SMART: Thinking/Done/Skipped)
-    if (m.includes("fast:") && (m.includes("thinking") || m.includes("done"))) return true;
-    if (m.includes("smart:") && (m.includes("thinking") || m.includes("done") || m.includes("skipped"))) return true;
+    // LLM step starts (FAST/SMART: Thinking...)
+    if (m.includes("fast:") && m.includes("thinking")) return true;
+    if (m.includes("smart:") && m.includes("thinking")) return true;
     
     // Workflow milestones
-    if (m.includes("starting workflow:")) return true;
+    if (m.includes("starting:")) return true;
     if (m.includes("workflow completed")) return true;
-    if (msg.startsWith("▶️")) return true;
-    if (m.includes("skipped")) return true;
+    
+    // Errors
+    if (m.includes("error") || m.includes("failed")) return true;
     
     return false;
   },
