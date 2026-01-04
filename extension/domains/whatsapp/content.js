@@ -117,8 +117,8 @@ const messageQueue = {
     if (m.includes("smart:") && m.includes("thinking")) return true;
     
     // Workflow milestones
-    if (m.includes("starting:")) return true;
-    if (m.includes("workflow completed")) return true;
+    if (m.includes("start:")) return true;
+    if (m.includes("done:")) return true;
     
     // Errors
     if (m.includes("error") || m.includes("failed")) return true;
