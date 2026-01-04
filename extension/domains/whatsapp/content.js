@@ -51,92 +51,82 @@ function debug(...args) {
 }
 
 /**
- * Message Queue - batches fast messages together and flushes on interval
+ * Message Queue - SIMPLIFIED: only sends "thinking..." and final response
  * 
- * IMPORTANT: This queue now blocks polling while flushing to prevent
- * the extension from picking up its own messages as user input.
+ * No more progress spam. Users see:
+ * 1. "🤖 _thinking..._" when task starts
+ * 2. "🤖 [final response]" when done
+ * 
+ * Progress messages are logged to console for debugging but NOT sent to chat.
  */
 const messageQueue = {
-  progressMessages: [],
+  thinkingSent: false,
   responseMessage: null,
-  flushTimeout: null,
   isFlushing: false,
-  FLUSH_INTERVAL: 1200, // ms - wait this long to batch messages (increased to reduce spam)
-  MAX_PROGRESS_MESSAGES: 5, // Don't queue more than this many progress messages
   
-  // Add a progress message to the queue
+  // Show that we're thinking (only once per task)
+  showThinking() {
+    if (this.thinkingSent) return;
+    this.thinkingSent = true;
+    sendingMessage = true;
+    sendWhatsAppMessage("🤖 _thinking..._").then(() => {
+      setTimeout(() => {
+        const newLastMsg = getLastMessage();
+        if (newLastMsg) lastSeenMessageText = newLastMsg;
+        sendingMessage = false;
+      }, 500);
+    });
+  },
+  
+  // Log progress but don't send to chat (too noisy)
   addProgress(msg) {
     if (!msg) return;
-    // Limit queue size to prevent spam during long workflows
-    if (this.progressMessages.length >= this.MAX_PROGRESS_MESSAGES) {
-      // Replace oldest with newest
-      this.progressMessages.shift();
-    }
-    this.progressMessages.push(msg);
-    this.scheduleFlush();
+    debug("Progress (not sending to chat):", msg);
+    // Progress messages are no longer sent to WhatsApp
+    // They were too noisy and caused the "chaos" issue
   },
   
-  // Set the response (high priority - flushes immediately after a short delay)
+  // Set the response - this gets sent immediately
   setResponse(text) {
     this.responseMessage = text;
-    // Give a tiny delay to let any pending progress messages arrive
-    setTimeout(() => this.flush(), 100);
+    this.flush();
   },
   
-  // Schedule a flush
-  scheduleFlush() {
-    if (this.flushTimeout) return; // Already scheduled
-    this.flushTimeout = setTimeout(() => this.flush(), this.FLUSH_INTERVAL);
-  },
-  
-  // Flush all queued messages to WhatsApp
+  // Flush the response to WhatsApp
   async flush() {
-    if (this.flushTimeout) {
-      clearTimeout(this.flushTimeout);
-      this.flushTimeout = null;
-    }
-    
-    // Prevent concurrent flushes and block polling
     if (this.isFlushing) return;
+    if (!this.responseMessage) return;
+    
     this.isFlushing = true;
-    sendingMessage = true; // Block polling during flush
+    sendingMessage = true;
     
     try {
-      // Grab and clear BEFORE async operations to prevent race conditions
-      const progressToSend = this.progressMessages;
-      this.progressMessages = [];
-      
       const responseToSend = this.responseMessage;
       this.responseMessage = null;
       
-      // Combine and send progress messages
-      if (progressToSend.length > 0) {
-        const combined = progressToSend.map(m => `_${m}_`).join('\n');
-        const progressText = `🤖 ${combined}`;
-        debug("Flushing progress:", progressToSend.length, "messages");
-        await sendWhatsAppMessage(progressText);
-      }
-      
-      // Send response (separate message, always last)
-      if (responseToSend) {
-        debug("Flushing response:", responseToSend.slice(0, 50));
-        await sendWhatsAppMessage(responseToSend);
-      }
+      debug("Sending response:", responseToSend.slice(0, 50));
+      await sendWhatsAppMessage(responseToSend);
       
       // Update lastSeenMessageText after sending to prevent loop
       await new Promise(resolve => setTimeout(resolve, 300));
       const newLastMsg = getLastMessage();
       if (newLastMsg) {
         lastSeenMessageText = newLastMsg;
-        debug("Updated cache after flush:", newLastMsg.slice(0, 30));
+        debug("Updated cache after send:", newLastMsg.slice(0, 30));
       }
     } finally {
       this.isFlushing = false;
-      // Keep sendingMessage = true for a bit longer to let DOM settle
+      this.thinkingSent = false; // Reset for next task
       setTimeout(() => {
         sendingMessage = false;
       }, 500);
     }
+  },
+  
+  // Reset state for new task
+  reset() {
+    this.thinkingSent = false;
+    this.responseMessage = null;
   }
 };
 
@@ -327,20 +317,18 @@ function handleBridgeFrame(frame) {
 
     case "processing_started":
       debug("Processing started");
-      messageQueue.addProgress("thinking...");
+      messageQueue.showThinking();
       setProcessing(true);
       break;
 
     case "processing_ended":
       debug("Processing ended");
       setProcessing(false);
-      // Don't flush here - let the response frame trigger the final flush
-      // This prevents race conditions with late-arriving progress messages
+      // Response will be sent via 'send' frame
       break;
 
     case "agent_progress":
-      // Queue progress messages - they'll be batched together
-      debug("Agent progress:", frame.message);
+      // Log progress to console only - not sent to chat (too noisy)
       messageQueue.addProgress(frame.message);
       break;
   }
@@ -957,33 +945,52 @@ function getLastMessage() {
 /**
  * Extract text content from a message row element
  * 
- * WhatsApp sometimes puts emojis in separate elements (like <img> with alt text).
- * We try multiple strategies to get the full text including emojis.
+ * WhatsApp structure:
+ * - .copyable-text contains the message + timestamp metadata in data-* attrs
+ * - Inside copyable-text, there's a span.selectable-text with JUST the message
+ * - The timestamp is in a separate element (not in selectable-text)
+ * 
+ * IMPORTANT: We target selectable-text to avoid capturing timestamps!
  */
 function extractMessageText(row) {
   if (!row) return null;
   
-  // Try to get the copyable-text container first - this usually has the full message
-  const copyableText = row.querySelector('.copyable-text');
-  if (copyableText) {
-    // Use textContent to get all text including from child elements
-    const fullText = copyableText.textContent?.trim();
-    if (fullText) return fullText;
+  // Best selector: selectable-text contains ONLY the message, no timestamp
+  const selectableText = row.querySelector('span.selectable-text.copyable-text');
+  if (selectableText) {
+    // Get innerText to get rendered text with emojis
+    const text = selectableText.innerText?.trim();
+    if (text) return text;
   }
   
-  // Try selectable-text spans
+  // Try the span inside selectable-text (WhatsApp nests them)
+  const innerSpan = row.querySelector('span.selectable-text span');
+  if (innerSpan) {
+    const text = innerSpan.innerText?.trim();
+    if (text) return text;
+  }
+  
+  // Fallback selectors - try to avoid timestamp elements
   const textSelectors = [
     'span[data-testid="selectable-text"]',
     'span.selectable-text',
-    '.copyable-text span',
-    "span[dir='ltr']",
+    // Avoid .copyable-text directly as it may include timestamp
   ];
   
   for (const sel of textSelectors) {
     const textEl = row.querySelector(sel);
     if (textEl) {
-      // Use textContent instead of innerText to capture more content
-      const text = textEl.textContent?.trim();
+      const text = textEl.innerText?.trim();
+      if (text) return text;
+    }
+  }
+  
+  // Last resort: try copyable-text but extract only the first span
+  const copyableText = row.querySelector('.copyable-text');
+  if (copyableText) {
+    const firstSpan = copyableText.querySelector('span');
+    if (firstSpan) {
+      const text = firstSpan.innerText?.trim();
       if (text) return text;
     }
   }
