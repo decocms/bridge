@@ -187,6 +187,7 @@ function handleBridgeFrame(frame) {
 
     case "send":
       // AI response - inject into WhatsApp
+      debug("📨 SEND frame received! Text:", frame.text?.slice(0, 50));
       // Set flag to pause polling during injection
       sendingMessage = true;
       sendWhatsAppMessage(frame.text);

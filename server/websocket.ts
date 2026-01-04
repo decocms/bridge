@@ -172,6 +172,11 @@ const IDEMPOTENCY_TTL = 5 * 60 * 1000;
 // ============================================================================
 
 function send(ws: WebSocket, frame: BridgeFrame): void {
+  if (frame.type === "send") {
+    console.error(
+      `[mesh-bridge] 📤 Sending "send" frame to WebSocket: ${JSON.stringify(frame).slice(0, 150)}`,
+    );
+  }
   ws.send(stringifyFrame(frame));
 }
 
