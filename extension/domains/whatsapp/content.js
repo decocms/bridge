@@ -83,20 +83,25 @@ const messageQueue = {
       this.flushTimeout = null;
     }
     
-    // Combine progress messages
-    if (this.progressMessages.length > 0) {
-      const combined = this.progressMessages.map(m => `_${m}_`).join('\n');
+    // Grab and clear BEFORE async operations to prevent race conditions
+    const progressToSend = this.progressMessages;
+    this.progressMessages = [];
+    
+    const responseToSend = this.responseMessage;
+    this.responseMessage = null;
+    
+    // Combine and send progress messages
+    if (progressToSend.length > 0) {
+      const combined = progressToSend.map(m => `_${m}_`).join('\n');
       const progressText = `🤖 ${combined}`;
-      debug("Flushing progress:", this.progressMessages.length, "messages");
+      debug("Flushing progress:", progressToSend.length, "messages");
       await sendWhatsAppMessage(progressText);
-      this.progressMessages = [];
     }
     
     // Send response (separate message, always last)
-    if (this.responseMessage) {
-      debug("Flushing response:", this.responseMessage.slice(0, 50));
-      await sendWhatsAppMessage(this.responseMessage);
-      this.responseMessage = null;
+    if (responseToSend) {
+      debug("Flushing response:", responseToSend.slice(0, 50));
+      await sendWhatsAppMessage(responseToSend);
     }
   }
 };
@@ -305,8 +310,8 @@ function handleBridgeFrame(frame) {
     case "processing_ended":
       debug("Processing ended");
       setProcessing(false);
-      // Flush any pending progress before the response comes
-      messageQueue.flush();
+      // Don't flush here - let the response frame trigger the final flush
+      // This prevents race conditions with late-arriving progress messages
       break;
 
     case "agent_progress":
