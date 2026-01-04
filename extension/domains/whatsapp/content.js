@@ -48,41 +48,58 @@ function debug(...args) {
 }
 
 /**
- * Filter progress messages to avoid spamming the chat.
- * Only show significant progress like workflow start/completion.
+ * Message Queue - batches fast messages together and flushes on interval
  */
-let lastProgressTime = 0;
-function shouldSendProgress(message) {
-  if (!message) return false;
+const messageQueue = {
+  progressMessages: [],
+  responseMessage: null,
+  flushTimeout: null,
+  FLUSH_INTERVAL: 800, // ms - wait this long to batch messages
   
-  const now = Date.now();
-  const msg = message.toLowerCase();
+  // Add a progress message to the queue
+  addProgress(msg) {
+    if (!msg) return;
+    this.progressMessages.push(msg);
+    this.scheduleFlush();
+  },
   
-  // Always show completion/error messages
-  if (msg.includes("✅") || msg.includes("❌") || msg.includes("completed") || msg.includes("done")) {
-    lastProgressTime = now;
-    return true;
+  // Set the response (high priority - flushes immediately after a short delay)
+  setResponse(text) {
+    this.responseMessage = text;
+    // Give a tiny delay to let any pending progress messages arrive
+    setTimeout(() => this.flush(), 100);
+  },
+  
+  // Schedule a flush
+  scheduleFlush() {
+    if (this.flushTimeout) return; // Already scheduled
+    this.flushTimeout = setTimeout(() => this.flush(), this.FLUSH_INTERVAL);
+  },
+  
+  // Flush all queued messages to WhatsApp
+  async flush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+    
+    // Combine progress messages
+    if (this.progressMessages.length > 0) {
+      const combined = this.progressMessages.map(m => `_${m}_`).join('\n');
+      const progressText = `🤖 ${combined}`;
+      debug("Flushing progress:", this.progressMessages.length, "messages");
+      await sendWhatsAppMessage(progressText);
+      this.progressMessages = [];
+    }
+    
+    // Send response (separate message, always last)
+    if (this.responseMessage) {
+      debug("Flushing response:", this.responseMessage.slice(0, 50));
+      await sendWhatsAppMessage(this.responseMessage);
+      this.responseMessage = null;
+    }
   }
-  
-  // Always show workflow start
-  if (msg.includes("starting workflow")) {
-    lastProgressTime = now;
-    return true;
-  }
-  
-  // Throttle other messages (max 1 per 2 seconds)
-  if (now - lastProgressTime < 2000) {
-    return false;
-  }
-  
-  // Skip very noisy messages
-  if (msg.includes("validating tools") || msg.includes("tools available") || msg.includes("listing")) {
-    return false;
-  }
-  
-  lastProgressTime = now;
-  return true;
-}
+};
 
 // =============================================================================
 // BRIDGE CONNECTION
@@ -186,15 +203,15 @@ function handleBridgeFrame(frame) {
       break;
 
     case "send":
-      // AI response - inject into WhatsApp
+      // AI response - queue it with high priority
       debug("📨 SEND frame received! Text:", frame.text?.slice(0, 50));
-      // Set flag to pause polling during injection
       sendingMessage = true;
-      sendWhatsAppMessage(frame.text);
       aiResponsePending = false;
       
-      // CRITICAL: Update lastSeenMessageText to the AI response we just sent
-      // This prevents the poll from picking it up as a "new" message
+      // Queue the response - it will flush after pending progress messages
+      messageQueue.setResponse(frame.text);
+      
+      // CRITICAL: Update lastSeenMessageText after the queue flushes
       setTimeout(() => {
         const newLastMsg = getLastMessage();
         if (newLastMsg) {
@@ -202,7 +219,7 @@ function handleBridgeFrame(frame) {
           debug("Updated cache after AI response:", newLastMsg.slice(0, 30));
         }
         sendingMessage = false; // Resume polling
-      }, 500);
+      }, 1500); // Longer delay to account for queue flush
       break;
 
     case "send_image":
@@ -281,21 +298,21 @@ function handleBridgeFrame(frame) {
 
     case "processing_started":
       debug("Processing started");
-      // Don't send "thinking" message - wait for actual progress
+      messageQueue.addProgress("thinking...");
+      setProcessing(true);
       break;
 
     case "processing_ended":
       debug("Processing ended");
-      // No action needed - the response message will follow
+      setProcessing(false);
+      // Flush any pending progress before the response comes
+      messageQueue.flush();
       break;
 
     case "agent_progress":
-      // Send progress updates to WhatsApp chat (visible from iOS too)
+      // Queue progress messages - they'll be batched together
       debug("Agent progress:", frame.message);
-      // Only send significant progress messages (not too chatty)
-      if (frame.message && shouldSendProgress(frame.message)) {
-        sendWhatsAppMessage(`🤖 _${frame.message}_`);
-      }
+      messageQueue.addProgress(frame.message);
       break;
   }
 }
