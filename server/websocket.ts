@@ -94,6 +94,15 @@ async function subscribeToEvents(): Promise<void> {
       `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.TASK_PROGRESS} → ${JSON.stringify(progResult).slice(0, 100)}`,
     );
 
+    // Subscribe to task completion events (for async workflows)
+    const completeResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
+      eventType: EVENT_TYPES.TASK_COMPLETED,
+      subscriberId,
+    });
+    console.error(
+      `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.TASK_COMPLETED} → ${JSON.stringify(completeResult).slice(0, 100)}`,
+    );
+
     eventSubscriptionActive = true;
   } catch (error) {
     console.error("[mesh-bridge] ❌ Failed to subscribe to events:", error);
@@ -137,6 +146,46 @@ export async function handleIncomingEvents(
           );
           await handleAgentResponse(event.data as AgentResponseEvent, ctx);
           console.error(`[mesh-bridge]   ✅ Response handler completed`);
+        } else if (event.type === EVENT_TYPES.TASK_COMPLETED && session.domain === "whatsapp") {
+          // Handle async workflow completion - send result to user
+          const taskData = event.data as {
+            taskId: string;
+            workflowId?: string;
+            workflowTitle?: string;
+            status: string;
+            result?: string;
+            error?: string;
+            chatId?: string;
+          };
+          
+          // Only handle if this is for the right chat or no specific chat
+          if (!taskData.chatId || taskData.chatId === session.domain) {
+            console.error(`[mesh-bridge]   ✅ Task completed: ${taskData.taskId}`);
+            
+            if (taskData.status === "completed" && taskData.result) {
+              // Send the result as a response
+              const resultText = typeof taskData.result === "string" 
+                ? taskData.result 
+                : JSON.stringify(taskData.result);
+              const workflowName = taskData.workflowTitle || taskData.workflowId || "task";
+              
+              ctx.send({
+                type: "agent_progress",
+                message: `✅ ${workflowName} completed`,
+              });
+              
+              ctx.send({
+                type: "send",
+                id: `task-${taskData.taskId}`,
+                text: `🤖 ${resultText}`,
+              });
+            } else if (taskData.status === "failed") {
+              ctx.send({
+                type: "agent_progress",
+                message: `❌ ${taskData.workflowTitle || "Task"} failed: ${taskData.error || "Unknown error"}`,
+              });
+            }
+          }
         } else if (event.type === EVENT_TYPES.TASK_PROGRESS) {
           const progressData = event.data as TaskProgressEvent;
           if (progressData.source === session.domain || !progressData.source) {
