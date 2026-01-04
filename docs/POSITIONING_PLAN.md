@@ -138,18 +138,79 @@ startBridge();
 
 **Benefit:** One mental model, less code duplication.
 
-#### 4. Simplify Extension Protocol
+#### 4. Extension Protocol Analysis
 
-```javascript
-// Current: Many frame types, complex state machine
-// Proposed: Three operations
+The extension protocol is actually well-designed for extensibility. Here's a detailed analysis:
 
-sendToAgent(message)        // User → Agent
-receiveFromAgent(response)  // Agent → User
-executeAction(action)       // Agent → DOM
+**Current Frame Types (Client → Bridge):**
+
+| Frame Type | Purpose | Extensibility |
+|------------|---------|---------------|
+| `connect` | Establish session, declare domain | ✅ Essential |
+| `message` | User message for AI processing | ✅ Core operation |
+| `command` | Slash commands, mode toggles | ✅ Extensible |
+| `ping` | Keep-alive heartbeat | ✅ Essential |
+| `tool_call` | Direct tool invocation from extension | ✅ Power user feature |
+| `event` | Domain-specific events (scraped data) | ✅ Extensible |
+
+**Current Frame Types (Bridge → Client):**
+
+| Frame Type | Purpose | Extensibility |
+|------------|---------|---------------|
+| `connected` | Session confirmation, mesh status | ✅ Essential |
+| `send` | AI response to inject into page | ✅ Core operation |
+| `send_image` | Image to inject (base64/URL) | ✅ WhatsApp-specific, generalizable |
+| `response` | Command response | ✅ Essential |
+| `pong` | Heartbeat response | ✅ Essential |
+| `error` | Error handling | ✅ Essential |
+| `event` | Bridge → Extension events | ✅ Extensible |
+| `tool_result` | Direct tool call result | ✅ Power user feature |
+| `speaking_started/ended` | TTS state | ⚠️ WhatsApp-specific |
+| `agent_mode_changed` | FAST/SMART mode | ⚠️ UI feedback |
+| `agent_progress` | Progress updates | ⚠️ UI feedback |
+
+**Assessment:** The protocol is robust and extensible. The "many frame types" actually serve different purposes:
+- **Core operations:** `connect`, `message`, `send`, `error` - essential for any domain
+- **Power features:** `tool_call`, `tool_result` - enable advanced use cases
+- **UI feedback:** `agent_progress`, `agent_mode_changed` - enhance UX but optional
+- **Domain-specific:** `speaking_started/ended`, `send_image` - should be events, not frame types
+
+**Proposed Refinement (not simplification):**
+
+Instead of reducing frame types, refine them:
+
+1. **Consolidate domain-specific frames into generic events:**
+```typescript
+// Instead of: speaking_started, speaking_ended, send_image
+// Use generic event frame:
+{ type: "event", event: "speaking_started", data: { text: "..." } }
+{ type: "event", event: "send_image", data: { imageUrl: "...", caption: "" } }
 ```
 
-**Benefit:** Extension becomes a thin DOM adapter.
+2. **Keep the robust type system** - it enables:
+   - Type-safe handling in both extension and bridge
+   - Clear separation of concerns
+   - Easy addition of new operations per domain
+
+3. **Standardize per-domain event conventions:**
+```typescript
+// Each domain declares what events it sends/receives
+interface DomainEventSchema {
+  // Events this domain sends to bridge
+  sends: {
+    scraped_chats: { chats: Chat[] }
+    scraped_messages: { messages: Message[] }
+  }
+  // Events this domain receives from bridge  
+  receives: {
+    request_chats: {}
+    request_messages: { chatId: string, limit?: number }
+    send_image: { imageUrl: string, caption?: string }
+  }
+}
+```
+
+**Benefit:** Protocol stays robust and extensible. Domain-specific features use the event system. Core frame types remain stable across all domains.
 
 ---
 
@@ -378,13 +439,19 @@ The project needs a clear conceptual frame. Options:
 
 ## 📋 Immediate Next Steps
 
-1. **Write new README** with the positioning above
-2. **Create `examples/` folder** with standalone use cases
-3. **Extract system tools** from WhatsApp domain
-4. **Build LinkedIn domain** as proof of pattern
-5. **Record demo video** showing the flow
-6. **Write blog post** explaining the insight
-7. **Set up Discord** for community
+### ✅ Completed
+1. ~~**Extract system tools** from WhatsApp domain~~ → Created `server/tools/` with system, speech, mesh, and task tools
+2. ~~**Simplify Agent class**~~ → Extracted router logic to `router-tools.ts`, cleaner Agent class
+3. ~~**Unify entry points**~~ → Created `server/index.ts` with auto-detection
+
+### 🔜 Next
+4. **Write new README** with the positioning above
+5. **Build LinkedIn domain** as proof of pattern
+6. **Create `examples/` folder** with standalone use cases
+7. **Record demo video** showing the flow
+8. **Refine extension protocol** - consolidate domain-specific frames into events
+9. **Write blog post** explaining the insight
+10. **Set up Discord** for community
 
 ---
 

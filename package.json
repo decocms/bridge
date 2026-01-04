@@ -5,13 +5,13 @@
   "private": true,
   "description": "Universal browser bridge for MCP Mesh - control any website through AI",
   "bin": {
-    "mesh-bridge": "./server/stdio.ts"
+    "mesh-bridge": "./server/index.ts"
   },
   "scripts": {
-    "server": "bun server/main.ts",
-    "dev": "bun --watch server/stdio.ts",
+    "start": "bun server/index.ts",
+    "dev": "bun --watch server/index.ts",
+    "dev:stdio": "bun --watch server/stdio.ts",
     "dev:standalone": "bun --watch server/main.ts",
-    "stdio": "bun server/stdio.ts",
     "test": "bun test",
     "test:mesh": "bun test server/core/mesh-client.test.ts",
     "check": "tsc --noEmit",
@@ -20,8 +20,8 @@
     "chrome": "open -na 'Google Chrome' --args --load-extension=\"$(pwd)/extension\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.20.2",
-    "zod": "^3.25.76",
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "zod": "^3.24.3",
     "zod-to-json-schema": "^3.24.5"
   },
   "devDependencies": {
