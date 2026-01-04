@@ -46,44 +46,67 @@ let chatChangeGracePeriod = false;
 
 function debug(...args) {
   if (DEBUG) {
-    console.log(`[mesh-bridge:${DOMAIN_ID}]`, ...args);
+    console.log(`[bridge]`, ...args);
   }
 }
 
 /**
- * Message Queue - SIMPLIFIED: only sends "thinking..." and final response
+ * Message Queue - Sends important milestones + final response
  * 
- * No more progress spam. Users see:
- * 1. "🤖 _thinking..._" when task starts
- * 2. "🤖 [final response]" when done
+ * VERBOSE mode (always true for now):
+ * - "🤖 _thinking..._" when task starts
+ * - Each workflow STEP start as separate message
+ * - Final response
  * 
- * Progress messages are logged to console for debugging but NOT sent to chat.
+ * Important progress = workflow step starts, phase changes
+ * Noise = tool calls, internal details (console only)
  */
 const messageQueue = {
   thinkingSent: false,
   responseMessage: null,
   isFlushing: false,
+  pendingSteps: [], // Queue of step messages to send
   
   // Show that we're thinking (only once per task)
   showThinking() {
     if (this.thinkingSent) return;
     this.thinkingSent = true;
-    sendingMessage = true;
-    sendWhatsAppMessage("🤖 _thinking..._").then(() => {
-      setTimeout(() => {
-        const newLastMsg = getLastMessage();
-        if (newLastMsg) lastSeenMessageText = newLastMsg;
-        sendingMessage = false;
-      }, 500);
-    });
+    this.sendToChat("🤖 _thinking..._");
   },
   
-  // Log progress but don't send to chat (too noisy)
+  // Check if this is an IMPORTANT progress message (step-level)
+  isImportantProgress(msg) {
+    if (!msg) return false;
+    const m = msg.toLowerCase();
+    
+    // Phase changes - agent steps starting
+    if (m.includes("fast:") && (m.includes("starting") || m.includes("done"))) return true;
+    if (m.includes("smart:") && (m.includes("starting") || m.includes("done") || m.includes("skipped"))) return true;
+    
+    // Workflow selected
+    if (m.includes("starting workflow:")) return true;
+    if (m.includes("workflow completed")) return true;
+    
+    // Workflow step starts (▶️ prefix)
+    if (msg.startsWith("▶️")) return true;
+    
+    // Step skipped
+    if (m.includes("skipped")) return true;
+    
+    return false;
+  },
+  
+  // Handle progress - send important ones to chat, log rest to console
   addProgress(msg) {
     if (!msg) return;
-    debug("Progress (not sending to chat):", msg);
-    // Progress messages are no longer sent to WhatsApp
-    // They were too noisy and caused the "chaos" issue
+    
+    if (this.isImportantProgress(msg)) {
+      debug("📢", msg);
+      this.sendToChat(`🤖 ${msg}`);
+    } else {
+      // Just log internal stuff (tool calls, etc)
+      debug(msg);
+    }
   },
   
   // Set the response - this gets sent immediately
@@ -92,34 +115,35 @@ const messageQueue = {
     this.flush();
   },
   
-  // Flush the response to WhatsApp
+  // Send a message to WhatsApp (used for steps and response)
+  async sendToChat(text) {
+    sendingMessage = true;
+    try {
+      await sendWhatsAppMessage(text);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const newLastMsg = getLastMessage();
+      if (newLastMsg) lastSeenMessageText = newLastMsg;
+    } finally {
+      setTimeout(() => { sendingMessage = false; }, 300);
+    }
+  },
+  
+  // Flush the final response to WhatsApp
   async flush() {
     if (this.isFlushing) return;
     if (!this.responseMessage) return;
     
     this.isFlushing = true;
-    sendingMessage = true;
     
     try {
       const responseToSend = this.responseMessage;
       this.responseMessage = null;
       
-      debug("Sending response:", responseToSend.slice(0, 50));
-      await sendWhatsAppMessage(responseToSend);
-      
-      // Update lastSeenMessageText after sending to prevent loop
-      await new Promise(resolve => setTimeout(resolve, 300));
-      const newLastMsg = getLastMessage();
-      if (newLastMsg) {
-        lastSeenMessageText = newLastMsg;
-        debug("Updated cache after send:", newLastMsg.slice(0, 30));
-      }
+      debug("📨 Response:", responseToSend.slice(0, 50));
+      await this.sendToChat(responseToSend);
     } finally {
       this.isFlushing = false;
-      this.thinkingSent = false; // Reset for next task
-      setTimeout(() => {
-        sendingMessage = false;
-      }, 500);
+      this.thinkingSent = false;
     }
   },
   
@@ -127,6 +151,7 @@ const messageQueue = {
   reset() {
     this.thinkingSent = false;
     this.responseMessage = null;
+    this.pendingSteps = [];
   }
 };
 
@@ -199,7 +224,10 @@ function sendFrame(frame) {
 }
 
 function handleBridgeFrame(frame) {
-  debug("Received frame:", frame.type);
+  // Only log important frames, skip noisy ones
+  if (!["pong", "agent_progress"].includes(frame.type)) {
+    debug("←", frame.type);
+  }
 
   switch (frame.type) {
     case "connected":
@@ -213,7 +241,7 @@ function handleBridgeFrame(frame) {
         reconnectInterval = null;
       }
       
-      debug("Connected! Session:", sessionId, "Domain:", frame.domain);
+      debug("✓ Connected");
       
       // Update UI (non-critical, might fail if badge not created yet)
       try {
@@ -232,12 +260,8 @@ function handleBridgeFrame(frame) {
       break;
 
     case "send":
-      // AI response - queue it with high priority
-      debug("📨 SEND frame received! Text:", frame.text?.slice(0, 50));
+      // AI response - send immediately
       aiResponsePending = false;
-      
-      // Queue the response - it will flush after pending progress messages
-      // The queue's flush() method handles sendingMessage flag and lastSeenMessageText update
       messageQueue.setResponse(frame.text);
       break;
 
@@ -316,19 +340,15 @@ function handleBridgeFrame(frame) {
       break;
 
     case "processing_started":
-      debug("Processing started");
       messageQueue.showThinking();
       setProcessing(true);
       break;
 
     case "processing_ended":
-      debug("Processing ended");
       setProcessing(false);
-      // Response will be sent via 'send' frame
       break;
 
     case "agent_progress":
-      // Log progress to console only - not sent to chat (too noisy)
       messageQueue.addProgress(frame.message);
       break;
   }
