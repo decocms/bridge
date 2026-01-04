@@ -112,9 +112,9 @@ const messageQueue = {
     if (!msg) return false;
     const m = msg.toLowerCase();
     
-    // Phase changes
-    if (m.includes("fast:") && (m.includes("starting") || m.includes("done"))) return true;
-    if (m.includes("smart:") && (m.includes("starting") || m.includes("done") || m.includes("skipped"))) return true;
+    // Phase changes (FAST: Thinking/Done, SMART: Thinking/Done/Skipped)
+    if (m.includes("fast:") && (m.includes("thinking") || m.includes("done"))) return true;
+    if (m.includes("smart:") && (m.includes("thinking") || m.includes("done") || m.includes("skipped"))) return true;
     
     // Workflow milestones
     if (m.includes("starting workflow:")) return true;
