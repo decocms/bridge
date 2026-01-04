@@ -343,7 +343,7 @@ function handleBridgeFrame(frame) {
       break;
 
     case "processing_started":
-      messageQueue.showThinking();
+      // Note: "thinking" message now comes from workflow progress (FAST: Thinking...)
       setProcessing(true);
       break;
 
@@ -766,8 +766,6 @@ async function sendWhatsAppMessage(text) {
       })
     );
   }
-
-  debug("Message sent");
   return true;
 }
 
