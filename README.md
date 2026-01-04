@@ -1,91 +1,146 @@
 # mesh-bridge
 
-**Universal browser bridge for MCP Mesh—control any website through AI.**
+**Connect any website to MCP Mesh via the Event Bus.**
 
-A Chrome extension and local server that connects websites to your MCP Mesh. Define **domains** (WhatsApp, LinkedIn, X, etc.) with custom message handlers and tools. Works like **RPA for any website**, powered by AI.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     MCP Mesh (port 3000)                        │
-│  OpenRouter · Perplexity · Custom MCPs · Your Tools             │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │ STDIO (mesh starts the process)
-┌──────────────────────────────┴──────────────────────────────────┐
-│                   MESH BRIDGE                                    │
-│  ┌─────────────┬─────────────┬─────────────┬─────────────┐      │
-│  │  WhatsApp   │  LinkedIn   │      X      │    ...      │      │
-│  │  (domain)   │  (domain)   │  (domain)   │  (any site) │      │
-│  └─────────────┴─────────────┴─────────────┴─────────────┘      │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │ WebSocket (port 9999)
-              Chrome Extension (injects into websites)
-```
-
-### Dual Communication
-
-- **Mesh → Bridge**: STDIO (when mesh starts the process)
-  - Receives `MESH_REQUEST_CONTEXT` with auth token
-  - Can call any mesh tool without API key
-  
-- **Bridge → Extension**: WebSocket (port 9999)
-  - Extension connects and declares its domain
-  - Messages flow through domain handlers
-  - AI responses sent back to the website
+A Chrome extension that maps DOM events to MCP Event Bus pub/sub—enabling AI agents to interact with any website. Think RPA, but powered by events and AI.
 
 ## How It Works
 
-1. **Extension** injects into websites and connects to mesh-bridge
-2. **Bridge** matches the URL to a **domain** (e.g., WhatsApp)
-3. **Domain** handles messages, transforms them into mesh commands
-4. **Mesh** executes tools (LLM, terminal, search, etc.)
-5. **Response** flows back through the domain to the website
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        MCP MESH                                  │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                      EVENT BUS                             │  │
+│  │                                                            │  │
+│  │   user.message.received ───────►  agent.response.whatsapp  │  │
+│  │   (Bridge publishes)              (Agent publishes)        │  │
+│  │                                                            │  │
+│  └─────────────▲─────────────────────────────┬───────────────┘  │
+│                │                             │                   │
+│                │ SUBSCRIBE                   │ PUBLISH           │
+│                │                             │                   │
+│  ┌─────────────┴───────┐           ┌────────▼────────────┐      │
+│  │       Pilot         │           │    mesh-bridge      │      │
+│  │    (AI Agent)       │           │  (DOM ↔ Events)     │      │
+│  │                     │           │                     │      │
+│  │  Subscribes to:     │           │  Subscribes to:     │      │
+│  │  user.message.*     │           │  agent.response.*   │      │
+│  │                     │           │  agent.task.*       │      │
+│  │  Publishes:         │           │                     │      │
+│  │  agent.response.*   │           │  Publishes:         │      │
+│  │  agent.task.*       │           │  user.message.*     │      │
+│  └─────────────────────┘           └──────────┬──────────┘      │
+│                                               │                  │
+└───────────────────────────────────────────────┼──────────────────┘
+                                                │ WebSocket
+                              ┌─────────────────▼─────────────────┐
+                              │        Chrome Extension           │
+                              │                                   │
+                              │  DOM Observation ──► Event Publish│
+                              │  Event Subscribe ──► DOM Mutation │
+                              │                                   │
+                              │  Example: WhatsApp Web            │
+                              │  • New message → publish event    │
+                              │  • Response event → inject reply  │
+                              └───────────────────────────────────┘
+```
 
-## Domains
+## Core Concept: DOM ↔ Event Bus Mapping
 
-Domains are plugins that define how to interact with a specific website:
+The bridge is a thin layer that translates between:
+- **DOM events** (user types, clicks, new elements appear)
+- **Event Bus messages** (CloudEvents pub/sub)
 
-```typescript
-const myDomain: Domain = {
-  id: "linkedin",
-  name: "LinkedIn",
-  urlPatterns: [/^https?:\/\/(www\.)?linkedin\.com/],
+It has **no AI logic**—agents subscribe to events and respond via events.
+
+### Example: WhatsApp Domain
+
+```javascript
+// 1. OBSERVE DOM → PUBLISH EVENT
+// When user sends a message in WhatsApp...
+
+const observer = new MutationObserver(() => {
+  const lastMessage = getLastMessage(); // Extract from DOM
   
-  // Handle incoming messages
-  handleMessage: async (message, ctx) => {
-    const response = await ctx.meshClient.generateWithLLM(
-      "anthropic/claude-sonnet-4",
-      [{ role: "user", content: message.text }],
-    );
-    ctx.send({ type: "send", id: message.id, chatId: message.chatId, text: response });
-  },
+  if (isNewUserMessage(lastMessage)) {
+    // Publish to Event Bus via WebSocket → Bridge → Mesh
+    socket.send(JSON.stringify({
+      type: "message",
+      domain: "whatsapp",
+      text: lastMessage.text,
+      chatId: getChatName(),
+    }));
+  }
+});
+
+observer.observe(messageContainer, { childList: true, subtree: true });
+```
+
+```javascript
+// 2. SUBSCRIBE TO EVENTS → MUTATE DOM
+// When agent responds...
+
+socket.onmessage = (event) => {
+  const frame = JSON.parse(event.data);
   
-  // Domain-specific tools
-  tools: [
-    {
-      name: "SEND_MESSAGE",
-      description: "Send a LinkedIn message",
-      execute: async (input, ctx) => { /* ... */ },
-    },
-  ],
+  if (frame.type === "send") {
+    // Inject response into WhatsApp's input and send
+    const input = document.querySelector('[data-testid="conversation-compose-box-input"]');
+    input.focus();
+    document.execCommand("insertText", false, frame.text);
+    document.querySelector('[data-testid="send"]').click();
+  }
 };
 ```
 
-### Current Domains
+## Event Types
 
-| Domain | Status | Description |
-|--------|--------|-------------|
-| WhatsApp | ✅ Ready | Message yourself to chat with AI |
-| LinkedIn | 🔜 Planned | AI-powered messaging and networking |
-| X (Twitter) | 🔜 Planned | Compose tweets, manage DMs |
-| Any Site | 🛠️ RPA | Add a domain for any website! |
+### Bridge → Agent (Publishing)
+
+```typescript
+// User sent a message via any interface
+"user.message.received" {
+  text: "What's the weather like?",
+  source: "whatsapp",      // or "linkedin", "x", "slack"...
+  chatId: "John Doe",
+  sender: { name: "John" },
+  metadata: { /* interface-specific data */ }
+}
+```
+
+### Agent → Bridge (Subscribing)
+
+```typescript
+// Task progress updates
+"agent.task.progress" {
+  taskId: "abc123",
+  source: "whatsapp",
+  message: "Checking weather API...",
+  percent: 50
+}
+
+// Final response
+"agent.response.whatsapp" {
+  taskId: "abc123",
+  chatId: "John Doe",
+  text: "It's 72°F and sunny ☀️",
+  isFinal: true
+}
+
+// Task completed
+"agent.task.completed" {
+  taskId: "abc123",
+  response: "It's 72°F and sunny",
+  duration: 2340,
+  toolsUsed: ["WEATHER_API"]
+}
+```
 
 ## Quick Start
 
-### Option 1: Add to Mesh (Recommended)
+### 1. Add to Mesh
 
-Add mesh-bridge as a **Custom Command** connection in your mesh:
+Add mesh-bridge as a **Custom Command** connection:
 
 | Field | Value |
 |-------|-------|
@@ -95,350 +150,391 @@ Add mesh-bridge as a **Custom Command** connection in your mesh:
 | **Arguments** | `run server` |
 | **Working Directory** | `/path/to/mesh-bridge` |
 
-The mesh will:
-1. Start the server automatically via STDIO
-2. Pass authentication context (no API key needed!)
-3. Keep it running as long as mesh is running
+The mesh will start the bridge and pass authentication context.
 
-Then load the extension:
+### 2. Load the Extension
+
 1. Open `chrome://extensions`
 2. Enable "Developer mode"
 3. Click "Load unpacked" → select `extension/`
 4. Navigate to WhatsApp Web
 
-### Option 2: Standalone (Manual)
+### 3. Test It
 
-If you prefer to run mesh-bridge separately:
+Send yourself a message in WhatsApp. The bridge will:
+1. Detect the new message (DOM observation)
+2. Publish `user.message.received` event
+3. Pilot agent receives and processes it
+4. Agent publishes `agent.response.whatsapp`
+5. Bridge receives and injects response into chat
 
-```bash
-cd mesh-bridge
-bun install
+## Creating a Domain
 
-# Configure (only needed for standalone mode)
-cp .env.example .env
-# Set MESH_API_KEY in .env
+A domain defines how to map a specific website's DOM to events.
 
-# Run
-bun run server
-```
+### Step 1: Content Script (DOM ↔ WebSocket)
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show commands |
-| `/status` | Check mesh + domain status |
-| `/tools` | List mesh tools |
-| `/domains` | List available domains |
-| `/clear` | Clear conversation |
-
-## Configuration
-
-```env
-# Mesh connection
-MESH_URL=http://localhost:3000
-MESH_API_KEY=...  # Optional if running inside mesh
-
-# Default AI model
-DEFAULT_MODEL=anthropic/claude-sonnet-4
-
-# Server port
-WS_PORT=9999
-
-# Terminal safety
-ALLOWED_PATHS=/Users/you/Projects
-```
-
-## Adding a New Domain
-
-Follow these steps to add support for a new website. This works for **any website**—think of it as AI-powered RPA.
-
-### Step 1: Create the Domain Handler
-
-Create `server/domains/mydomain/index.ts`:
-
-```typescript
-import type { Domain, DomainMessage, DomainContext, DomainTool } from "../../core/domain.ts";
-
-// System prompt for AI interactions in this domain
-const SYSTEM_PROMPT = `You are an AI assistant integrated with MyDomain.
-Keep responses concise and helpful.`;
-
-// Domain-specific tools (optional)
-const tools: DomainTool[] = [
-  {
-    name: "SEND_MESSAGE",
-    description: "Send a message in MyDomain",
-    inputSchema: {
-      type: "object",
-      properties: {
-        chatId: { type: "string" },
-        text: { type: "string" },
-      },
-      required: ["chatId", "text"],
-    },
-    execute: async (input, ctx) => {
-      const { chatId, text } = input as { chatId: string; text: string };
-      ctx.send({ type: "send", id: `tool-${Date.now()}`, chatId, text });
-      return { success: true };
-    },
-  },
-];
-
-// Message handler
-async function handleMessage(message: DomainMessage, ctx: DomainContext): Promise<void> {
-  const { meshClient, session, send, config } = ctx;
-  
-  // Get conversation history
-  let conversation = session.conversations.get(message.chatId) || [];
-  
-  // Build messages for LLM
-  const messages = [
-    { role: "system" as const, content: SYSTEM_PROMPT },
-    ...conversation.map((c) => ({ role: c.role, content: c.content })),
-    { role: "user" as const, content: message.text },
-  ];
-  
-  // Generate AI response via mesh
-  const response = await meshClient.generateWithLLM(
-    config.defaultModel || "anthropic/claude-sonnet-4",
-    messages,
-    { maxTokens: 2048 },
-  );
-  
-  // Update conversation history
-  conversation.push({ role: "user", content: message.text, timestamp: new Date() });
-  conversation.push({ role: "assistant", content: response, timestamp: new Date() });
-  session.conversations.set(message.chatId, conversation.slice(-20));
-  
-  // Send response back to the website
-  send({
-    type: "send",
-    id: message.id,
-    chatId: message.chatId,
-    text: `🤖 ${response}`,
-  });
-}
-
-// Export the domain
-export const myDomain: Domain = {
-  id: "mydomain",
-  name: "My Domain",
-  description: "AI assistant for MyDomain",
-  icon: "https://example.com/icon.png",
-  
-  // URL patterns to match
-  urlPatterns: [
-    /^https?:\/\/(www\.)?example\.com/,
-  ],
-  
-  systemPrompt: SYSTEM_PROMPT,
-  tools,
-  handleMessage,
-  
-  // Optional: handle slash commands
-  handleCommand: async (command, args, ctx) => {
-    if (command === "/mycommand") {
-      return { handled: true, response: "🤖 Custom command response" };
-    }
-    return { handled: false };
-  },
-  
-  // Optional: lifecycle hooks
-  onInit: async (ctx) => {
-    console.log(`[mydomain] Initialized for session ${ctx.session.id}`);
-  },
-  onDestroy: async (ctx) => {
-    console.log(`[mydomain] Session ended`);
-  },
-};
-
-export default myDomain;
-```
-
-### Step 2: Register the Domain
-
-In `server/main.ts`, import and register your domain:
-
-```typescript
-// Import domains
-import { whatsappDomain } from "./domains/whatsapp/index.ts";
-import { myDomain } from "./domains/mydomain/index.ts";  // Add this
-
-// Register domains
-registerDomain(whatsappDomain);
-registerDomain(myDomain);  // Add this
-```
-
-### Step 3: Create the Content Script
-
-Create `extension/domains/mydomain/content.js`:
+Create `extension/domains/linkedin/content.js`:
 
 ```javascript
-/**
- * MyDomain - Content Script
- */
-
-const DOMAIN_ID = "mydomain";
+const DOMAIN_ID = "linkedin";
 const BRIDGE_URL = "ws://localhost:9999";
 
 let socket = null;
-let connected = false;
 
-// Connect to mesh-bridge
+// ============================================================================
+// CONNECTION
+// ============================================================================
+
 function connect() {
   socket = new WebSocket(BRIDGE_URL);
   
   socket.onopen = () => {
+    // Announce our domain to the bridge
     socket.send(JSON.stringify({
       type: "connect",
-      client: "chrome-extension",
-      version: "1.0.0",
       domain: DOMAIN_ID,
       url: window.location.href,
+      capabilities: ["messages", "notifications"],
     }));
   };
   
-  socket.onmessage = (event) => {
-    const frame = JSON.parse(event.data);
-    
-    if (frame.type === "connected") {
-      connected = true;
-      console.log(`[${DOMAIN_ID}] Connected to mesh-bridge`);
-    }
-    
-    if (frame.type === "send") {
-      // Inject the AI response into the page
-      injectMessage(frame.chatId, frame.text);
-    }
-  };
-  
-  socket.onclose = () => {
-    connected = false;
-    setTimeout(connect, 5000);  // Reconnect
-  };
+  socket.onmessage = handleServerMessage;
+  socket.onclose = () => setTimeout(connect, 5000);
 }
 
-// Send message to bridge for AI processing
-function sendToBridge(text, chatId) {
-  if (!connected) return;
-  
-  socket.send(JSON.stringify({
-    type: "message",
-    id: `msg-${Date.now()}`,
-    domain: DOMAIN_ID,
-    text,
-    chatId,
-    isSelf: true,
-    timestamp: Date.now(),
-  }));
-}
+// ============================================================================
+// DOM → EVENTS (Publishing)
+// ============================================================================
 
-// Inject AI response into the page (customize for your domain)
-function injectMessage(chatId, text) {
-  // TODO: Implement for your specific website
-  console.log(`[${DOMAIN_ID}] Would send: ${text}`);
-}
-
-// Observe for new messages (customize for your domain)
 function observeMessages() {
-  // TODO: Set up MutationObserver for your specific website
+  // Find LinkedIn's message container
+  const container = document.querySelector('.msg-overlay-list-bubble');
+  if (!container) {
+    setTimeout(observeMessages, 1000);
+    return;
+  }
+
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.classList?.contains('msg-s-message-list__event')) {
+          const text = node.querySelector('.msg-s-event-listitem__body')?.innerText;
+          const sender = node.querySelector('.msg-s-message-group__name')?.innerText;
+          
+          if (text && isFromOther(node)) {
+            // Publish user message event
+            socket.send(JSON.stringify({
+              type: "message",
+              domain: DOMAIN_ID,
+              text,
+              chatId: getCurrentChatId(),
+              sender: { name: sender },
+            }));
+          }
+        }
+      }
+    }
+  });
+
+  observer.observe(container, { childList: true, subtree: true });
 }
 
-// Initialize
+// ============================================================================
+// EVENTS → DOM (Subscribing)
+// ============================================================================
+
+function handleServerMessage(event) {
+  const frame = JSON.parse(event.data);
+  
+  switch (frame.type) {
+    case "connected":
+      console.log(`[${DOMAIN_ID}] Connected to bridge`);
+      observeMessages();
+      break;
+      
+    case "send":
+      // Agent wants to send a response
+      injectMessage(frame.chatId, frame.text);
+      break;
+      
+    case "navigate":
+      // Agent wants to navigate to a profile/page
+      window.location.href = frame.url;
+      break;
+      
+    case "click":
+      // Agent wants to click something
+      document.querySelector(frame.selector)?.click();
+      break;
+  }
+}
+
+function injectMessage(chatId, text) {
+  const input = document.querySelector('.msg-form__contenteditable');
+  if (!input) return;
+  
+  input.focus();
+  document.execCommand("insertText", false, text);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  
+  // Click send
+  setTimeout(() => {
+    document.querySelector('.msg-form__send-button')?.click();
+  }, 100);
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+function getCurrentChatId() {
+  return document.querySelector('.msg-overlay-bubble-header__title')?.innerText || 'unknown';
+}
+
+function isFromOther(node) {
+  return !node.classList.contains('msg-s-message-list__event--sent');
+}
+
+// Start
 connect();
-observeMessages();
 ```
 
-### Step 4: Update the Manifest
+### Step 2: Server Domain Handler
 
-Add your domain to `extension/manifest.json`:
+Create `server/domains/linkedin/index.ts`:
+
+```typescript
+import type { Domain, DomainMessage, DomainContext } from "../../core/domain.ts";
+import { EVENT_TYPES } from "../../events.ts";
+
+export const linkedinDomain: Domain = {
+  id: "linkedin",
+  name: "LinkedIn",
+  urlPatterns: [/^https?:\/\/(www\.)?linkedin\.com/],
+  
+  // Transform incoming WebSocket message to Event Bus event
+  async handleMessage(message: DomainMessage, ctx: DomainContext) {
+    // Publish to event bus - Pilot will pick it up
+    await ctx.meshClient.callTool("EVENT_PUBLISH", {
+      type: EVENT_TYPES.USER_MESSAGE,
+      data: {
+        text: message.text,
+        source: "linkedin",
+        chatId: message.chatId,
+        sender: message.sender,
+      },
+    });
+    
+    // Progress and responses come via event subscriptions
+    // The bridge auto-routes them back to this domain
+  },
+  
+  // Domain-specific tools (optional)
+  tools: [
+    {
+      name: "LINKEDIN_PROFILE",
+      description: "Get current LinkedIn profile info",
+      execute: async (input, ctx) => {
+        // Request profile data from content script
+        ctx.send({ type: "request_profile" });
+        // Response comes via event
+        return { success: true, message: "Profile requested" };
+      },
+    },
+  ],
+};
+```
+
+### Step 3: Register Domain
+
+In `server/main.ts`:
+
+```typescript
+import { linkedinDomain } from "./domains/linkedin/index.ts";
+
+registerDomain(linkedinDomain);
+```
+
+### Step 4: Update Manifest
+
+In `extension/manifest.json`:
 
 ```json
 {
   "content_scripts": [
     {
-      "matches": ["https://web.whatsapp.com/*"],
-      "js": ["domains/whatsapp/content.js"],
-      "css": ["panel.css"]
-    },
-    {
-      "matches": ["https://example.com/*"],
-      "js": ["domains/mydomain/content.js"],
-      "css": ["panel.css"]
+      "matches": ["https://www.linkedin.com/*"],
+      "js": ["domains/linkedin/content.js"]
     }
-  ],
-  "host_permissions": [
-    "https://web.whatsapp.com/*",
-    "https://example.com/*"
   ]
 }
 ```
 
-### Step 5: Test
+## Common DOM → Event Patterns
 
-1. Restart the server: `bun run server`
-2. Reload the extension in `chrome://extensions`
-3. Navigate to your domain's website
-4. Check the console for connection logs
-5. Try sending a message!
+### Pattern 1: Message Observer
 
-### Domain Interface Reference
-
-```typescript
-interface Domain {
-  id: string;                    // Unique identifier
-  name: string;                  // Display name
-  description: string;           // What it does
-  icon?: string;                 // Icon URL
-  urlPatterns: RegExp[];         // URLs to match
+```javascript
+// Observe new messages and publish events
+function observeMessages() {
+  const container = document.querySelector(MESSAGES_SELECTOR);
   
-  // Required: handle incoming messages
-  handleMessage: (message: DomainMessage, ctx: DomainContext) => Promise<void>;
-  
-  // Optional: handle slash commands
-  handleCommand?: (command: string, args: string[], ctx: DomainContext) 
-    => Promise<{ handled: boolean; response?: string }>;
-  
-  // Optional: domain-specific tools exposed to mesh
-  tools?: DomainTool[];
-  
-  // Optional: system prompt for AI
-  systemPrompt?: string;
-  
-  // Optional: lifecycle hooks
-  onInit?: (ctx: DomainContext) => Promise<void>;
-  onDestroy?: (ctx: DomainContext) => Promise<void>;
+  new MutationObserver((mutations) => {
+    const newMessages = extractNewMessages(mutations);
+    
+    for (const msg of newMessages) {
+      if (shouldProcess(msg)) {
+        publishEvent("user.message.received", {
+          text: msg.text,
+          source: DOMAIN_ID,
+          chatId: msg.chatId,
+        });
+      }
+    }
+  }).observe(container, { childList: true, subtree: true });
 }
 ```
 
-## API
+### Pattern 2: Click Events
 
-### DomainContext
+```javascript
+// Track button clicks and publish events
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-action]");
+  if (button) {
+    publishEvent("user.action.click", {
+      action: button.dataset.action,
+      source: DOMAIN_ID,
+      context: extractContext(button),
+    });
+  }
+});
+```
 
-Passed to all domain handlers:
+### Pattern 3: Form Submissions
 
-```typescript
-interface DomainContext {
-  meshClient: MeshClient;  // Call mesh tools
-  session: Session;        // Session state
-  send: (frame) => void;   // Send response
-  config: DomainConfig;    // Domain config
+```javascript
+// Intercept form submissions
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  const formData = new FormData(form);
+  
+  publishEvent("user.action.submit", {
+    formId: form.id,
+    data: Object.fromEntries(formData),
+    source: DOMAIN_ID,
+  });
+});
+```
+
+### Pattern 4: Page Navigation
+
+```javascript
+// Observe URL changes (for SPAs)
+let lastUrl = location.href;
+
+new MutationObserver(() => {
+  if (location.href !== lastUrl) {
+    lastUrl = location.href;
+    publishEvent("user.navigation", {
+      url: location.href,
+      source: DOMAIN_ID,
+    });
+  }
+}).observe(document, { subtree: true, childList: true });
+```
+
+## Common Event → DOM Patterns
+
+### Pattern 1: Inject Text
+
+```javascript
+// Insert AI response into an input
+function handleSendResponse(frame) {
+  const input = document.querySelector(INPUT_SELECTOR);
+  input.focus();
+  document.execCommand("insertText", false, frame.text);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 ```
 
-### MeshClient
+### Pattern 2: Click Element
 
-```typescript
-// Call any mesh tool
-await ctx.meshClient.callTool("TOOL_NAME", { arg: "value" });
-
-// Generate LLM response
-await ctx.meshClient.generateWithLLM(model, messages, options);
-
-// List available tools
-await ctx.meshClient.listTools();
+```javascript
+// Click a button on behalf of agent
+function handleClick(frame) {
+  const element = document.querySelector(frame.selector);
+  if (element) {
+    element.click();
+  }
+}
 ```
+
+### Pattern 3: Show Notification
+
+```javascript
+// Display agent feedback in the UI
+function handleNotification(frame) {
+  const toast = document.createElement("div");
+  toast.className = "mesh-bridge-toast";
+  toast.textContent = frame.message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 3000);
+}
+```
+
+### Pattern 4: Navigate
+
+```javascript
+// Navigate to a different page
+function handleNavigate(frame) {
+  window.location.href = frame.url;
+}
+```
+
+## Available Domains
+
+| Domain | Status | Description |
+|--------|--------|-------------|
+| WhatsApp | ✅ Ready | Chat with AI via self-messages |
+| LinkedIn | 🔜 Planned | AI-powered messaging |
+| X (Twitter) | 🔜 Planned | Tweet composition, DMs |
+| Slack | 🔜 Planned | Workspace integration |
+| Any Site | 🛠️ RPA | Add your own domain! |
+
+## Configuration
+
+```env
+# WebSocket port for extension connection
+WS_PORT=9999
+
+# Default AI model (used by agents)
+DEFAULT_MODEL=anthropic/claude-sonnet-4
+
+# Mesh connection (automatic when run via Mesh)
+MESH_URL=http://localhost:3000
+MESH_API_KEY=...  # Optional if running inside mesh
+```
+
+## Development
+
+```bash
+# Install dependencies
+bun install
+
+# Run the bridge server
+bun run server
+
+# Run tests
+bun test
+```
+
+## See Also
+
+- [Architecture](docs/ARCHITECTURE.md) - Detailed architecture overview
+- [MCP Mesh Event Bus](https://github.com/decolabs/mesh) - Event bus documentation
+- [Pilot Agent](../mcps/pilot) - AI agent that processes events
 
 ## License
 

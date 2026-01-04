@@ -1036,8 +1036,11 @@ function resetObserverState() {
   
   // Wait for DOM to fully update, then capture last message
   setTimeout(() => {
-    lastSeenMessageText = getLastMessage() || "";
-    debug(`Observer reset. Last message: "${lastSeenMessageText.slice(0, 50)}..."`);
+    const lastMsg = getLastMessage() || "";
+    lastSeenMessageText = lastMsg;
+    
+    const isAI = isAIResponse(lastMsg);
+    debug(`Observer reset. Last message: "${lastMsg.slice(0, 50)}..." (isAI: ${isAI})`);
     
     // End grace period after capturing the state
     setTimeout(() => {
@@ -1092,13 +1095,21 @@ function startMessageObserver() {
     // Same as before? Skip.
     if (currentLastMessage === lastSeenMessageText) return;
 
+    // IMPORTANT: Check if AI response BEFORE updating cache
+    // This prevents re-processing AI messages when switching chats
+    if (isAIResponse(currentLastMessage)) {
+      // It's an AI response - just update cache and skip processing
+      lastSeenMessageText = currentLastMessage;
+      debug("Skipping AI response (updated cache)");
+      return;
+    }
+
     // Update cache IMMEDIATELY to prevent loops
     lastSeenMessageText = currentLastMessage;
 
-    // Check if this is a message we should process
+    // Check if this is a message we should process (empty check etc)
     if (!shouldProcessMessage(currentLastMessage)) {
-      // AI response or empty - ignore
-      debug("Ignoring AI response or empty message");
+      debug("Ignoring empty or invalid message");
       return;
     }
 
@@ -1121,18 +1132,32 @@ function isAIResponse(text) {
   // Primary check: starts with robot emoji
   if (trimmed.startsWith("🤖")) return true;
   
+  // Check if emoji might be in img alt text (WhatsApp renders some emojis as images)
+  if (trimmed.includes("🤖")) return true;
+  
   // Fallback: check for known AI message patterns
   // These are messages the AI/bridge sends that might lose their emoji prefix
   const aiPatterns = [
+    // Error messages
     "Waiting for Mesh credentials",
     "Could not reach Pilot agent",
+    // Thinking indicators
     "thinking...",
     "_thinking..._",
+    // Workflow progress (old format)
     "Validating tools for:",
     "Starting workflow:",
+    "Workflow completed",
+    // LLM step indicators  
     "FAST:",
     "SMART:",
-    "Workflow completed",
+    // New format workflow progress
+    "Start:",
+    "Done:",
+    "📋 Start:",
+    "✅ Done:",
+    "⚡ FAST:",
+    "🧠 SMART:",
   ];
   
   for (const pattern of aiPatterns) {
