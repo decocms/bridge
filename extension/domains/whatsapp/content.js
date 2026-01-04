@@ -53,25 +53,58 @@ function debug(...args) {
 /**
  * Message Queue - Sends important milestones + final response
  * 
- * VERBOSE mode (always true for now):
- * - "🤖 _thinking..._" when task starts
- * - Each workflow STEP start as separate message
- * - Final response
- * 
- * Important progress = workflow step starts, phase changes
- * Noise = tool calls, internal details (console only)
+ * Uses a proper queue to prevent race conditions with concurrent sends.
+ * Messages are sent one at a time, in order.
  */
 const messageQueue = {
+  queue: [],
+  isProcessing: false,
   thinkingSent: false,
-  responseMessage: null,
-  isFlushing: false,
-  pendingSteps: [], // Queue of step messages to send
+  
+  // Add message to queue and start processing
+  enqueue(text, isResponse = false) {
+    this.queue.push({ text, isResponse });
+    this.processQueue();
+  },
+  
+  // Process queue one message at a time
+  async processQueue() {
+    if (this.isProcessing) return;
+    if (this.queue.length === 0) return;
+    
+    this.isProcessing = true;
+    sendingMessage = true;
+    
+    while (this.queue.length > 0) {
+      const { text, isResponse } = this.queue.shift();
+      
+      try {
+        debug(isResponse ? "📨" : "📢", text.slice(0, 60));
+        await sendWhatsAppMessage(text);
+        
+        // Wait for DOM to update
+        await new Promise(resolve => setTimeout(resolve, 300));
+        
+        // Update cache
+        const newLastMsg = getLastMessage();
+        if (newLastMsg) lastSeenMessageText = newLastMsg;
+        
+        // Reset thinking flag after response
+        if (isResponse) this.thinkingSent = false;
+      } catch (err) {
+        debug("❌ Send failed:", err);
+      }
+    }
+    
+    this.isProcessing = false;
+    setTimeout(() => { sendingMessage = false; }, 300);
+  },
   
   // Show that we're thinking (only once per task)
   showThinking() {
     if (this.thinkingSent) return;
     this.thinkingSent = true;
-    this.sendToChat("🤖 _thinking..._");
+    this.enqueue("🤖 _thinking..._");
   },
   
   // Check if this is an IMPORTANT progress message (step-level)
@@ -79,18 +112,14 @@ const messageQueue = {
     if (!msg) return false;
     const m = msg.toLowerCase();
     
-    // Phase changes - agent steps starting
+    // Phase changes
     if (m.includes("fast:") && (m.includes("starting") || m.includes("done"))) return true;
     if (m.includes("smart:") && (m.includes("starting") || m.includes("done") || m.includes("skipped"))) return true;
     
-    // Workflow selected
+    // Workflow milestones
     if (m.includes("starting workflow:")) return true;
     if (m.includes("workflow completed")) return true;
-    
-    // Workflow step starts (▶️ prefix)
     if (msg.startsWith("▶️")) return true;
-    
-    // Step skipped
     if (m.includes("skipped")) return true;
     
     return false;
@@ -101,57 +130,21 @@ const messageQueue = {
     if (!msg) return;
     
     if (this.isImportantProgress(msg)) {
-      debug("📢", msg);
-      this.sendToChat(`🤖 ${msg}`);
+      this.enqueue(`🤖 ${msg}`);
     } else {
-      // Just log internal stuff (tool calls, etc)
       debug(msg);
     }
   },
   
-  // Set the response - this gets sent immediately
+  // Set the response - queue it (high priority via flag)
   setResponse(text) {
-    this.responseMessage = text;
-    this.flush();
+    this.enqueue(text, true);
   },
   
-  // Send a message to WhatsApp (used for steps and response)
-  async sendToChat(text) {
-    sendingMessage = true;
-    try {
-      await sendWhatsAppMessage(text);
-      await new Promise(resolve => setTimeout(resolve, 200));
-      const newLastMsg = getLastMessage();
-      if (newLastMsg) lastSeenMessageText = newLastMsg;
-    } finally {
-      setTimeout(() => { sendingMessage = false; }, 300);
-    }
-  },
-  
-  // Flush the final response to WhatsApp
-  async flush() {
-    if (this.isFlushing) return;
-    if (!this.responseMessage) return;
-    
-    this.isFlushing = true;
-    
-    try {
-      const responseToSend = this.responseMessage;
-      this.responseMessage = null;
-      
-      debug("📨 Response:", responseToSend.slice(0, 50));
-      await this.sendToChat(responseToSend);
-    } finally {
-      this.isFlushing = false;
-      this.thinkingSent = false;
-    }
-  },
-  
-  // Reset state for new task
+  // Reset state
   reset() {
     this.thinkingSent = false;
-    this.responseMessage = null;
-    this.pendingSteps = [];
+    this.queue = [];
   }
 };
 
