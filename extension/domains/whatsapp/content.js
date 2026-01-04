@@ -218,17 +218,19 @@ function handleBridgeFrame(frame) {
 
     case "processing_started":
       debug("Processing started");
-      setProcessing(true);
+      // Send a "thinking" message to WhatsApp so iOS can see it too
+      sendWhatsAppMessage("🤖 _thinking..._");
       break;
 
     case "processing_ended":
       debug("Processing ended");
-      setProcessing(false);
+      // No UI update needed - the response message will follow
       break;
 
     case "agent_progress":
+      // Progress is shown in the "thinking" message context
+      // Could send progress updates to chat, but might be too chatty
       debug("Agent progress:", frame.message);
-      updateAgentProgress(frame.message);
       break;
   }
 }
@@ -272,208 +274,79 @@ function createStatusBadge() {
   badge.id = "mesh-bridge-status";
   badge.innerHTML = `
     <style>
+      /* Minimal bridge indicator - just a tiny dot */
       #mesh-bridge-badge {
         position: fixed;
-        top: 60px;
-        left: 50%;
-        transform: translateX(-50%);
-        padding: 6px 12px;
-        background: #1a1a1a;
-        color: white;
-        border-radius: 16px;
-        font-size: 11px;
-        font-family: system-ui, -apple-system, sans-serif;
-        z-index: 10000;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        cursor: default;
-        opacity: 0.85;
-      }
-      #mesh-bridge-badge .status-dot {
-        width: 6px;
-        height: 6px;
+        top: 12px;
+        right: 12px;
+        width: 10px;
+        height: 10px;
         border-radius: 50%;
         background: #666;
-        flex-shrink: 0;
+        z-index: 10000;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.3);
       }
-      #mesh-bridge-badge.connected .status-dot {
+      #mesh-bridge-badge:hover {
+        transform: scale(1.5);
+      }
+      #mesh-bridge-badge.connected {
         background: #00cc66;
-        box-shadow: 0 0 4px #00cc66;
+        box-shadow: 0 0 6px #00cc66;
       }
-      #mesh-bridge-badge.reconnecting .status-dot {
+      #mesh-bridge-badge.reconnecting {
         background: #ffaa00;
-        box-shadow: 0 0 4px #ffaa00;
         animation: blink-reconnect 0.5s infinite;
+      }
+      #mesh-bridge-badge.disabled {
+        background: #cc3333;
       }
       @keyframes blink-reconnect {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.3; }
       }
-      #mesh-bridge-badge .speaker-toggle {
-        padding: 3px 10px;
-        border-radius: 10px;
-        cursor: pointer;
-        font-size: 10px;
-        font-weight: 600;
-        transition: all 0.15s ease;
-        border: none;
-        background: #444;
-        color: #aaa;
-      }
-      #mesh-bridge-badge .speaker-toggle:hover {
-        transform: scale(1.05);
-      }
-      #mesh-bridge-badge .speaker-toggle.on {
-        background: #0088cc;
-        color: white;
-      }
+      /* Hidden elements for backwards compat */
+      #mesh-bridge-badge .status-dot,
+      #mesh-bridge-badge .status-text,
+      #mesh-bridge-badge .processing-dot,
+      #mesh-bridge-badge .progress-indicator,
+      #mesh-bridge-badge .enable-toggle,
+      #mesh-bridge-badge .speaker-toggle,
       #mesh-bridge-badge .stop-speaking {
-        padding: 3px 10px;
-        border-radius: 10px;
-        cursor: pointer;
-        font-size: 10px;
-        font-weight: 600;
-        transition: all 0.15s ease;
-        border: none;
-        background: #cc3333;
-        color: white;
         display: none;
-        animation: pulse-stop 1s infinite;
-      }
-      #mesh-bridge-badge .stop-speaking:hover {
-        background: #ff4444;
-        transform: scale(1.05);
-      }
-      #mesh-bridge-badge .stop-speaking.visible {
-        display: inline-block;
-      }
-      @keyframes pulse-stop {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.7; }
-      }
-      #mesh-bridge-badge .processing-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #444;
-        display: none;
-      }
-      #mesh-bridge-badge .processing-dot.active {
-        display: inline-block;
-        background: #66ccff;
-        animation: pulse-dot 1s infinite;
-      }
-      @keyframes pulse-dot {
-        0%, 100% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(1.3); opacity: 0.7; }
-      }
-      #mesh-bridge-badge .progress-indicator {
-        font-size: 10px;
-        color: #88ccff;
-        padding: 2px 8px;
-        max-width: 200px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      #mesh-bridge-badge .progress-indicator:empty {
-        display: none;
-      }
-      #mesh-bridge-badge .enable-toggle {
-        padding: 3px 10px;
-        border-radius: 10px;
-        cursor: pointer;
-        font-size: 10px;
-        font-weight: 600;
-        transition: all 0.15s ease;
-        border: none;
-        background: #00cc66;
-        color: white;
-      }
-      #mesh-bridge-badge .enable-toggle:hover {
-        transform: scale(1.05);
-      }
-      #mesh-bridge-badge .enable-toggle.off {
-        background: #cc3333;
-      }
-      #mesh-bridge-badge.disabled {
-        opacity: 0.5;
-      }
-      #mesh-bridge-badge.disabled .status-dot {
-        background: #cc3333 !important;
-        box-shadow: none !important;
       }
     </style>
-    <div id="mesh-bridge-badge">
-      <span class="enable-toggle">ON</span>
-      <span class="status-dot"></span>
-      <span class="status-text">Bridge</span>
-      <span class="processing-dot"></span>
-      <span class="progress-indicator"></span>
-      <span class="speaker-toggle">🔇 Mute</span>
-      <span class="stop-speaking">🛑 Stop</span>
-    </div>
+    <div id="mesh-bridge-badge" title="Mesh Bridge"></div>
   `;
   document.body.appendChild(badge);
   
-  // Add click handler for speaker toggle
-  const speakerToggle = badge.querySelector(".speaker-toggle");
-  speakerToggle.addEventListener("click", (e) => {
-    e.stopPropagation();
-    speakerMode = !speakerMode;
-    updateSpeakerToggle();
-    debug("Speaker mode:", speakerMode ? "ON" : "OFF");
-    
-    // Send command to bridge to update session state
-    sendFrame({
-      type: "command",
-      command: "set_speaker_mode",
-      domain: DOMAIN_ID,
-      args: { enabled: speakerMode },
-    });
-  });
-
-  // Add click handler for stop speaking button
-  const stopBtn = badge.querySelector(".stop-speaking");
-  stopBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    debug("Stop speaking clicked");
-    
-    // Send command to bridge to stop speaking
-    sendFrame({
-      type: "command",
-      command: "stop_speaking",
-      domain: DOMAIN_ID,
-      args: {},
-    });
-    
-    // Hide the button immediately
-    hideStopSpeakingButton();
-  });
-
-  // Add click handler for enable/disable toggle
-  const enableToggle = badge.querySelector(".enable-toggle");
-  enableToggle.addEventListener("click", (e) => {
+  // Click to toggle extension on/off
+  const badgeEl = badge.querySelector("#mesh-bridge-badge");
+  badgeEl.addEventListener("click", (e) => {
     e.stopPropagation();
     extensionEnabled = !extensionEnabled;
-    updateEnableToggle();
-    debug("Extension enabled:", extensionEnabled ? "ON" : "OFF");
+    debug("Extension toggled:", extensionEnabled ? "ON" : "OFF");
+    
+    // Update visual state
+    if (extensionEnabled) {
+      badgeEl.classList.remove("disabled");
+      badgeEl.title = "Mesh Bridge (click to disable)";
+    } else {
+      badgeEl.classList.add("disabled");
+      badgeEl.title = "Mesh Bridge DISABLED (click to enable)";
+    }
     
     // Persist state
     if (typeof chrome !== "undefined" && chrome.storage) {
       chrome.storage.local.set({ meshBridgeEnabled: extensionEnabled });
     }
     
-    // If disabling, stop the observer
+    // Toggle observer
     if (!extensionEnabled) {
       stopMessageObserver();
-    } else {
-      // If enabling and we're in self-chat, restart observer
-      if (isSelfChat()) {
-        startMessageObserver();
-      }
+    } else if (isSelfChat()) {
+      startMessageObserver();
     }
   });
 
@@ -482,120 +355,40 @@ function createStatusBadge() {
     chrome.storage.local.get(["meshBridgeEnabled"], (result) => {
       if (result.meshBridgeEnabled === false) {
         extensionEnabled = false;
-        updateEnableToggle();
+        badgeEl.classList.add("disabled");
+        badgeEl.title = "Mesh Bridge DISABLED (click to enable)";
         debug("Extension disabled from storage");
       }
     });
   }
 }
 
-function showStopSpeakingButton() {
-  const stopBtn = document.querySelector("#mesh-bridge-badge .stop-speaking");
-  if (stopBtn) {
-    stopBtn.classList.add("visible");
-    debug("Stop button shown");
-  }
-}
-
-function hideStopSpeakingButton() {
-  const stopBtn = document.querySelector("#mesh-bridge-badge .stop-speaking");
-  if (stopBtn) {
-    stopBtn.classList.remove("visible");
-    debug("Stop button hidden");
-  }
-}
-
+// These are no-ops now - UI is minimal, progress shown in chat messages
+function showStopSpeakingButton() {}
+function hideStopSpeakingButton() {}
 function setProcessing(active) {
   isProcessing = active;
-  
-  const dot = document.querySelector("#mesh-bridge-badge .processing-dot");
-  if (!dot) return;
-  
-  if (active) {
-    dot.classList.add("active");
-  } else {
-    dot.classList.remove("active");
-    // Clear progress after a short delay
-    setTimeout(() => {
-      const progress = document.querySelector("#mesh-bridge-badge .progress-indicator");
-      if (progress) progress.textContent = "";
-    }, 3000);
-  }
-  
-  debug("Processing:", active ? "started" : "ended");
 }
 
+// No-op - progress now shown in chat messages
 function updateAgentProgress(message) {
-  // If we receive progress, we're processing
-  if (message && !message.includes("✅") && !message.includes("❌")) {
-    setProcessing(true);
-  }
-  
-  const indicator = document.querySelector("#mesh-bridge-badge .progress-indicator");
-  if (!indicator) {
-    // Create progress indicator if it doesn't exist
-    const badge = document.querySelector("#mesh-bridge-badge");
-    if (badge) {
-      const progress = document.createElement("span");
-      progress.className = "progress-indicator";
-      progress.textContent = message;
-      // Insert after processing dot
-      const procDot = badge.querySelector(".processing-dot");
-      if (procDot) {
-        procDot.after(progress);
-      } else {
-        badge.appendChild(progress);
-      }
-      // Auto-hide after 5 seconds if it's a completion message
-      if (message.includes("✅") || message.includes("❌")) {
-        setProcessing(false);
-        setTimeout(() => {
-          progress.textContent = "";
-        }, 5000);
-      }
-    }
-    return;
-  }
-  
-  indicator.textContent = message;
-  
-  // Auto-hide completion messages and end processing
-  if (message.includes("✅") || message.includes("❌")) {
-    setProcessing(false);
-    setTimeout(() => {
-      indicator.textContent = "";
-    }, 5000);
-  }
-  
   debug("Agent progress:", message);
 }
 
-function updateSpeakerToggle() {
-  const toggle = document.querySelector("#mesh-bridge-badge .speaker-toggle");
-  if (!toggle) return;
-  
-  if (speakerMode) {
-    toggle.textContent = "🔊 Speaker";
-    toggle.className = "speaker-toggle on";
-  } else {
-    toggle.textContent = "🔇 Mute";
-    toggle.className = "speaker-toggle";
-  }
-}
+// No-op - speaker toggle removed from UI
+function updateSpeakerToggle() {}
 
+// Update the minimal badge for enable/disable state
 function updateEnableToggle() {
-  const toggle = document.querySelector("#mesh-bridge-badge .enable-toggle");
   const badge = document.querySelector("#mesh-bridge-badge");
-  if (!toggle || !badge) return;
+  if (!badge) return;
   
   if (extensionEnabled) {
-    toggle.textContent = "ON";
-    toggle.className = "enable-toggle";
     badge.classList.remove("disabled");
+    badge.title = "Mesh Bridge (click to disable)";
   } else {
-    toggle.textContent = "OFF";
-    toggle.className = "enable-toggle off";
     badge.classList.add("disabled");
+    badge.title = "Mesh Bridge DISABLED (click to enable)";
   }
 }
 
