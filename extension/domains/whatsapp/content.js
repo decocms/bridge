@@ -302,17 +302,27 @@ function handleBridgeFrame(frame) {
       break;
 
     case "error":
-      // Error from bridge
-      debug("Bridge error:", frame.code, frame.message);
+      // Error from bridge - show in badge, DON'T send to chat (becomes stale)
+      debug("⚠️", frame.code, frame.message);
+      aiResponsePending = false;
+      setProcessing(false);
+      
+      // Flash badge to indicate error
+      const badge = document.getElementById("mesh-bridge-badge");
+      if (badge) {
+        badge.style.background = "#ff6600";
+        badge.title = frame.message || "Error";
+        setTimeout(() => {
+          badge.style.background = "";
+          badge.title = "Mesh Bridge";
+        }, 3000);
+      }
+      
       if (frame.code === "credentials_stale") {
-        // Bridge is restarting due to stale credentials
-        // Force disconnect and wait for new bridge
         updateStatusUI("reconnecting");
         bridgeConnected = false;
         sessionId = null;
-        if (bridgeSocket) {
-          bridgeSocket.close();
-        }
+        if (bridgeSocket) bridgeSocket.close();
       }
       break;
 

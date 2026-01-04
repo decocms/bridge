@@ -161,12 +161,13 @@ async function handleMessage(message: WhatsAppMessage, ctx: DomainContext): Prom
   );
 
   if (!eventBusId) {
-    console.error(`[whatsapp] ❌ No EVENT_BUS binding found! Sending error to user.`);
+    // Don't send error to chat - it becomes stale once Mesh reconnects
+    // Just log and send error frame to update the badge
+    console.error(`[whatsapp] ❌ No EVENT_BUS binding - Mesh not connected`);
     send({
-      type: "send",
-      id: message.id,
-      chatId: message.chatId,
-      text: `${aiPrefix}⚠️ *Waiting for Mesh credentials...*\n\nRestart Mesh or refresh the connection.`,
+      type: "error",
+      code: "mesh_not_connected",
+      message: "Waiting for Mesh credentials",
     });
     return;
   }
@@ -219,12 +220,13 @@ async function handleMessage(message: WhatsAppMessage, ctx: DomainContext): Prom
   );
 
   if (!published) {
+    // Don't send error to chat - just log and update badge
+    console.error(`[whatsapp] ❌ Failed to publish to Pilot`);
     send({ type: "processing_ended" } as any);
     send({
-      type: "send",
-      id: message.id,
-      chatId: message.chatId,
-      text: `${aiPrefix}⚠️ Could not reach Pilot agent. Make sure it's running in the mesh.`,
+      type: "error",
+      code: "pilot_unreachable",
+      message: "Could not reach Pilot agent",
     });
   }
 
