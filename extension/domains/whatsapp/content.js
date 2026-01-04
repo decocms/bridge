@@ -37,6 +37,9 @@ let isProcessing = false;
 // Global enable/disable toggle (persisted)
 let extensionEnabled = true;
 
+// Grace period after chat changes - prevents processing stale messages
+let chatChangeGracePeriod = false;
+
 // =============================================================================
 // LOGGING
 // =============================================================================
@@ -49,16 +52,26 @@ function debug(...args) {
 
 /**
  * Message Queue - batches fast messages together and flushes on interval
+ * 
+ * IMPORTANT: This queue now blocks polling while flushing to prevent
+ * the extension from picking up its own messages as user input.
  */
 const messageQueue = {
   progressMessages: [],
   responseMessage: null,
   flushTimeout: null,
-  FLUSH_INTERVAL: 800, // ms - wait this long to batch messages
+  isFlushing: false,
+  FLUSH_INTERVAL: 1200, // ms - wait this long to batch messages (increased to reduce spam)
+  MAX_PROGRESS_MESSAGES: 5, // Don't queue more than this many progress messages
   
   // Add a progress message to the queue
   addProgress(msg) {
     if (!msg) return;
+    // Limit queue size to prevent spam during long workflows
+    if (this.progressMessages.length >= this.MAX_PROGRESS_MESSAGES) {
+      // Replace oldest with newest
+      this.progressMessages.shift();
+    }
     this.progressMessages.push(msg);
     this.scheduleFlush();
   },
@@ -83,25 +96,46 @@ const messageQueue = {
       this.flushTimeout = null;
     }
     
-    // Grab and clear BEFORE async operations to prevent race conditions
-    const progressToSend = this.progressMessages;
-    this.progressMessages = [];
+    // Prevent concurrent flushes and block polling
+    if (this.isFlushing) return;
+    this.isFlushing = true;
+    sendingMessage = true; // Block polling during flush
     
-    const responseToSend = this.responseMessage;
-    this.responseMessage = null;
-    
-    // Combine and send progress messages
-    if (progressToSend.length > 0) {
-      const combined = progressToSend.map(m => `_${m}_`).join('\n');
-      const progressText = `🤖 ${combined}`;
-      debug("Flushing progress:", progressToSend.length, "messages");
-      await sendWhatsAppMessage(progressText);
-    }
-    
-    // Send response (separate message, always last)
-    if (responseToSend) {
-      debug("Flushing response:", responseToSend.slice(0, 50));
-      await sendWhatsAppMessage(responseToSend);
+    try {
+      // Grab and clear BEFORE async operations to prevent race conditions
+      const progressToSend = this.progressMessages;
+      this.progressMessages = [];
+      
+      const responseToSend = this.responseMessage;
+      this.responseMessage = null;
+      
+      // Combine and send progress messages
+      if (progressToSend.length > 0) {
+        const combined = progressToSend.map(m => `_${m}_`).join('\n');
+        const progressText = `🤖 ${combined}`;
+        debug("Flushing progress:", progressToSend.length, "messages");
+        await sendWhatsAppMessage(progressText);
+      }
+      
+      // Send response (separate message, always last)
+      if (responseToSend) {
+        debug("Flushing response:", responseToSend.slice(0, 50));
+        await sendWhatsAppMessage(responseToSend);
+      }
+      
+      // Update lastSeenMessageText after sending to prevent loop
+      await new Promise(resolve => setTimeout(resolve, 300));
+      const newLastMsg = getLastMessage();
+      if (newLastMsg) {
+        lastSeenMessageText = newLastMsg;
+        debug("Updated cache after flush:", newLastMsg.slice(0, 30));
+      }
+    } finally {
+      this.isFlushing = false;
+      // Keep sendingMessage = true for a bit longer to let DOM settle
+      setTimeout(() => {
+        sendingMessage = false;
+      }, 500);
     }
   }
 };
@@ -210,21 +244,11 @@ function handleBridgeFrame(frame) {
     case "send":
       // AI response - queue it with high priority
       debug("📨 SEND frame received! Text:", frame.text?.slice(0, 50));
-      sendingMessage = true;
       aiResponsePending = false;
       
       // Queue the response - it will flush after pending progress messages
+      // The queue's flush() method handles sendingMessage flag and lastSeenMessageText update
       messageQueue.setResponse(frame.text);
-      
-      // CRITICAL: Update lastSeenMessageText after the queue flushes
-      setTimeout(() => {
-        const newLastMsg = getLastMessage();
-        if (newLastMsg) {
-          lastSeenMessageText = newLastMsg;
-          debug("Updated cache after AI response:", newLastMsg.slice(0, 30));
-        }
-        sendingMessage = false; // Resume polling
-      }, 1500); // Longer delay to account for queue flush
       break;
 
     case "send_image":
@@ -547,12 +571,28 @@ function getChatName() {
   return "unknown";
 }
 
+// Cache self-chat detection to avoid logging on every poll
+let lastSelfChatState = null;
+let lastSelfChatName = null;
+
 function isSelfChat() {
   const chatName = getChatName().toLowerCase();
+  
+  // If chat name changed, reset cache
+  if (chatName !== lastSelfChatName) {
+    lastSelfChatName = chatName;
+    lastSelfChatState = null;
+  }
+  
+  // Return cached result if available (don't re-log)
+  if (lastSelfChatState !== null) {
+    return lastSelfChatState;
+  }
 
   // Check for "(você)" which is the explicit self-chat marker in Portuguese
   if (chatName.includes("(você)")) {
     debug("Self-chat detected: (você) in chat name");
+    lastSelfChatState = true;
     return true;
   }
 
@@ -571,6 +611,7 @@ function isSelfChat() {
   for (const pattern of selfPatterns) {
     if (chatName.includes(pattern)) {
       debug("Self-chat detected via pattern:", pattern);
+      lastSelfChatState = true;
       return true;
     }
   }
@@ -578,6 +619,7 @@ function isSelfChat() {
   // Check for self-chat badge (WhatsApp marks self-chats)
   if (document.querySelector('[data-testid="self"]')) {
     debug("Self-chat detected via [data-testid='self']");
+    lastSelfChatState = true;
     return true;
   }
 
@@ -585,9 +627,11 @@ function isSelfChat() {
   const vocalSpan = document.querySelector('#main header span.xjuopq5');
   if (vocalSpan?.innerText?.toLowerCase().includes("você")) {
     debug("Self-chat detected via header (você) span");
+    lastSelfChatState = true;
     return true;
   }
 
+  lastSelfChatState = false;
   return false;
 }
 
@@ -912,10 +956,22 @@ function getLastMessage() {
 
 /**
  * Extract text content from a message row element
+ * 
+ * WhatsApp sometimes puts emojis in separate elements (like <img> with alt text).
+ * We try multiple strategies to get the full text including emojis.
  */
 function extractMessageText(row) {
   if (!row) return null;
   
+  // Try to get the copyable-text container first - this usually has the full message
+  const copyableText = row.querySelector('.copyable-text');
+  if (copyableText) {
+    // Use textContent to get all text including from child elements
+    const fullText = copyableText.textContent?.trim();
+    if (fullText) return fullText;
+  }
+  
+  // Try selectable-text spans
   const textSelectors = [
     'span[data-testid="selectable-text"]',
     'span.selectable-text',
@@ -925,8 +981,10 @@ function extractMessageText(row) {
   
   for (const sel of textSelectors) {
     const textEl = row.querySelector(sel);
-    if (textEl?.innerText?.trim()) {
-      return textEl.innerText.trim();
+    if (textEl) {
+      // Use textContent instead of innerText to capture more content
+      const text = textEl.textContent?.trim();
+      if (text) return text;
     }
   }
   
@@ -935,14 +993,29 @@ function extractMessageText(row) {
 
 /**
  * Reset state for new chat - just capture the current last message
+ * Uses a grace period to let the DOM fully update after chat changes
  */
 function resetObserverState() {
   aiResponsePending = false;
   
-  // Capture the LAST message text - this is what we'll compare against
-  lastSeenMessageText = getLastMessage() || "";
+  // Reset self-chat detection cache
+  lastSelfChatState = null;
+  lastSelfChatName = null;
   
-  debug(`Observer reset. Last message: "${lastSeenMessageText.slice(0, 50)}..."`);
+  // Start grace period - don't process any messages for a bit
+  chatChangeGracePeriod = true;
+  
+  // Wait for DOM to fully update, then capture last message
+  setTimeout(() => {
+    lastSeenMessageText = getLastMessage() || "";
+    debug(`Observer reset. Last message: "${lastSeenMessageText.slice(0, 50)}..."`);
+    
+    // End grace period after capturing the state
+    setTimeout(() => {
+      chatChangeGracePeriod = false;
+      debug("Grace period ended, ready to process messages");
+    }, 500);
+  }, 500);
 }
 
 let pollInterval = null;
@@ -970,6 +1043,9 @@ function startMessageObserver() {
   pollInterval = setInterval(() => {
     // Skip if extension is disabled
     if (!extensionEnabled) return;
+    
+    // Skip during grace period after chat changes
+    if (chatChangeGracePeriod) return;
     
     // Skip if not ready or if we're in the middle of sending a response
     if (!selfChatEnabled || !bridgeConnected || aiResponsePending || sendingMessage) return;
@@ -1004,12 +1080,40 @@ function startMessageObserver() {
 }
 
 /**
- * Check if a message is from the AI (has robot prefix).
+ * Check if a message is from the AI (has robot prefix or is a known AI pattern).
  * AI responses ALWAYS start with 🤖 - this is our reliable marker.
+ * 
+ * NOTE: WhatsApp sometimes renders emojis in separate DOM elements,
+ * so we also check for known AI message patterns as a fallback.
  */
 function isAIResponse(text) {
   const trimmed = text.trim();
-  return trimmed.startsWith("🤖");
+  
+  // Primary check: starts with robot emoji
+  if (trimmed.startsWith("🤖")) return true;
+  
+  // Fallback: check for known AI message patterns
+  // These are messages the AI/bridge sends that might lose their emoji prefix
+  const aiPatterns = [
+    "Waiting for Mesh credentials",
+    "Could not reach Pilot agent",
+    "thinking...",
+    "_thinking..._",
+    "Validating tools for:",
+    "Starting workflow:",
+    "FAST:",
+    "SMART:",
+    "Workflow completed",
+  ];
+  
+  for (const pattern of aiPatterns) {
+    if (trimmed.includes(pattern)) {
+      debug("Detected AI message via pattern:", pattern);
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 // No local shortcuts - all commands go through Pilot via events
@@ -1042,62 +1146,138 @@ function stopMessageObserver() {
 }
 
 /**
+ * Simulate a real click on an element (WhatsApp uses React, needs proper events)
+ */
+function simulateClick(element) {
+  if (!element) return false;
+  
+  // Get element center coordinates
+  const rect = element.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  
+  // Create and dispatch mouse events in sequence
+  const events = ['mousedown', 'mouseup', 'click'];
+  for (const eventType of events) {
+    const event = new MouseEvent(eventType, {
+      view: window,
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+      button: 0,
+    });
+    element.dispatchEvent(event);
+  }
+  
+  return true;
+}
+
+/**
  * Auto-click on self-chat to open it
  */
 function clickSelfChat() {
   debug("Attempting to find and click self-chat...");
-
-  // Method 1: Look for the "(você)" span in the chat list
-  const voceSpan = document.querySelector('span.xjuopq5');
-  if (voceSpan?.innerText?.includes("você")) {
-    const clickTarget = voceSpan.closest('[role="row"], [role="listitem"], div[data-testid]');
-    if (clickTarget) {
-      debug("Found self-chat via (você) span, clicking...");
-      clickTarget.click();
-      return true;
-    }
+  
+  // Get the chat list container
+  const chatList = document.querySelector('#pane-side') || 
+                   document.querySelector('[aria-label*="Chat list"]') ||
+                   document.querySelector('[data-testid="chat-list"]');
+  
+  if (!chatList) {
+    debug("Chat list not found, WhatsApp may still be loading...");
+    return false;
   }
 
-  // Method 2: Look for cell-frame-container with "(você)" text
-  const cellFrames = document.querySelectorAll('[data-testid="cell-frame-container"]');
-  for (const frame of cellFrames) {
-    if (frame.innerText?.includes("(você)") || frame.innerText?.includes("você")) {
-      debug("Found self-chat via cell-frame text, clicking...");
-      frame.click();
-      return true;
-    }
-  }
-
-  // Method 3: Look for chat row with self patterns
-  const chatRows = document.querySelectorAll('[role="listitem"], [role="row"], ._ak72');
-  for (const row of chatRows) {
-    const text = row.innerText?.toLowerCase() || "";
-
+  // Method 1: Look for chat items with "(você)" text - most reliable
+  const allChatItems = chatList.querySelectorAll('[data-testid="cell-frame-container"], [role="listitem"], [role="row"]');
+  debug(`Found ${allChatItems.length} chat items to scan`);
+  
+  for (const item of allChatItems) {
+    const text = item.innerText?.toLowerCase() || "";
+    
     // Check for self-chat patterns
     if (text.includes("(você)") || 
         text.includes("message yourself") || 
-        text.includes("mensagem para você")) {
-      debug("Found self-chat row by text pattern, clicking...");
-      row.click();
+        text.includes("mensagem para você mesmo") ||
+        text.includes("(you)")) {
+      
+      debug("Found self-chat item:", text.slice(0, 50));
+      
+      // Collect all potential clickable elements
+      const clickTargets = [];
+      
+      // The chat name/title span - usually the most reliable
+      const nameSpan = item.querySelector('span[title]');
+      if (nameSpan) clickTargets.push({ el: nameSpan, name: 'name-span' });
+      
+      // Avatar image
+      const avatar = item.querySelector('img');
+      if (avatar) clickTargets.push({ el: avatar, name: 'avatar' });
+      
+      // Any div with role="gridcell" 
+      const gridCell = item.querySelector('[role="gridcell"]');
+      if (gridCell) clickTargets.push({ el: gridCell, name: 'gridcell' });
+      
+      // The item's parent row if it has role
+      const row = item.closest('[role="row"]');
+      if (row && row !== item) clickTargets.push({ el: row, name: 'row' });
+      
+      // The item itself
+      clickTargets.push({ el: item, name: 'item' });
+      
+      debug(`Trying ${clickTargets.length} click targets...`);
+      
+      // Try clicking each target with a small delay
+      let targetIndex = 0;
+      const tryNextTarget = () => {
+        if (document.querySelector('#main')) {
+          debug("Chat opened!");
+          return;
+        }
+        
+        if (targetIndex >= clickTargets.length) {
+          debug("All targets tried");
+          return;
+        }
+        
+        const target = clickTargets[targetIndex];
+        debug(`Trying target ${targetIndex + 1}/${clickTargets.length}: ${target.name}`);
+        
+        // Try both simulated and real click
+        simulateClick(target.el);
+        target.el.click();
+        
+        // Also try focusing and pressing Enter
+        target.el.focus?.();
+        target.el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        
+        targetIndex++;
+        setTimeout(tryNextTarget, 200);
+      };
+      
+      tryNextTarget();
       return true;
     }
   }
 
-  // Method 4: Look for span with title containing user's name + (você)
-  const titleSpans = document.querySelectorAll('span[title]');
+  // Method 2: Look for span with title containing self-chat patterns
+  const titleSpans = chatList.querySelectorAll('span[title]');
   for (const span of titleSpans) {
     const title = span.getAttribute("title")?.toLowerCase() || "";
-    if (title.includes("você") || title.includes("yourself")) {
-      const clickTarget = span.closest('[role="row"], [role="listitem"], ._ak72');
-      if (clickTarget) {
-        debug("Found self-chat via title span, clicking...");
-        clickTarget.click();
+    if (title.includes("você") || title.includes("yourself") || title.includes("(you)")) {
+      debug("Found self-chat via title:", title.slice(0, 30));
+      
+      // Navigate up to find the row/listitem
+      const row = span.closest('[role="row"], [role="listitem"], [data-testid="cell-frame-container"]');
+      if (row) {
+        simulateClick(row);
         return true;
       }
     }
   }
 
-  debug("Could not find self-chat to auto-click");
+  debug("Could not find self-chat in chat list");
   return false;
 }
 
@@ -1177,12 +1357,27 @@ function startWhatsAppSetup() {
     if (!document.querySelector('#main')) {
       debug("No chat open, trying to auto-click self-chat...");
       const clicked = clickSelfChat();
+      
       if (clicked) {
-        // Wait for chat to load, then capture initial messages and start observer
-        setTimeout(() => {
-          debug("Chat should be loaded, capturing initial messages...");
-          startMessageObserver();
-        }, 2000);
+        // Wait for chat to load, verify it opened, then start observer
+        let retries = 0;
+        const checkChatOpened = () => {
+          if (document.querySelector('#main')) {
+            debug("Chat opened successfully!");
+            startMessageObserver();
+          } else if (retries < 3) {
+            retries++;
+            debug(`Chat not open yet, retry ${retries}/3...`);
+            // Try clicking again
+            clickSelfChat();
+            setTimeout(checkChatOpened, 1500);
+          } else {
+            debug("Failed to open self-chat after 3 retries");
+          }
+        };
+        setTimeout(checkChatOpened, 1500);
+      } else {
+        debug("Could not find self-chat, waiting for manual selection...");
       }
     } else {
       // Chat is already open - wait a bit for messages to fully render before capturing
