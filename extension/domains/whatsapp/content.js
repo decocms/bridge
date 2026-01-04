@@ -47,6 +47,43 @@ function debug(...args) {
   }
 }
 
+/**
+ * Filter progress messages to avoid spamming the chat.
+ * Only show significant progress like workflow start/completion.
+ */
+let lastProgressTime = 0;
+function shouldSendProgress(message) {
+  if (!message) return false;
+  
+  const now = Date.now();
+  const msg = message.toLowerCase();
+  
+  // Always show completion/error messages
+  if (msg.includes("✅") || msg.includes("❌") || msg.includes("completed") || msg.includes("done")) {
+    lastProgressTime = now;
+    return true;
+  }
+  
+  // Always show workflow start
+  if (msg.includes("starting workflow")) {
+    lastProgressTime = now;
+    return true;
+  }
+  
+  // Throttle other messages (max 1 per 2 seconds)
+  if (now - lastProgressTime < 2000) {
+    return false;
+  }
+  
+  // Skip very noisy messages
+  if (msg.includes("validating tools") || msg.includes("tools available") || msg.includes("listing")) {
+    return false;
+  }
+  
+  lastProgressTime = now;
+  return true;
+}
+
 // =============================================================================
 // BRIDGE CONNECTION
 // =============================================================================
@@ -243,19 +280,21 @@ function handleBridgeFrame(frame) {
 
     case "processing_started":
       debug("Processing started");
-      // Send a "thinking" message to WhatsApp so iOS can see it too
-      sendWhatsAppMessage("🤖 _thinking..._");
+      // Don't send "thinking" message - wait for actual progress
       break;
 
     case "processing_ended":
       debug("Processing ended");
-      // No UI update needed - the response message will follow
+      // No action needed - the response message will follow
       break;
 
     case "agent_progress":
-      // Progress is shown in the "thinking" message context
-      // Could send progress updates to chat, but might be too chatty
+      // Send progress updates to WhatsApp chat (visible from iOS too)
       debug("Agent progress:", frame.message);
+      // Only send significant progress messages (not too chatty)
+      if (frame.message && shouldSendProgress(frame.message)) {
+        sendWhatsAppMessage(`🤖 _${frame.message}_`);
+      }
       break;
   }
 }

@@ -71,26 +71,32 @@ async function subscribeToEvents(): Promise<void> {
     console.error("[mesh-bridge] MESH_CONNECTION_ID not set, subscriptions may not work");
   }
 
+  console.error(
+    `[mesh-bridge] Subscribing to events (eventBusId: ${eventBusId}, subscriberId: ${subscriberId || "MISSING!"})`,
+  );
+
   try {
     // Subscribe to agent.response.whatsapp events
-    await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
+    const respResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
       eventType: EVENT_TYPES.RESPONSE_WHATSAPP,
       subscriberId, // Use our actual connection ID
     });
     console.error(
-      `[mesh-bridge] Subscribed to ${EVENT_TYPES.RESPONSE_WHATSAPP} (subscriber: ${subscriberId})`,
+      `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.RESPONSE_WHATSAPP} → ${JSON.stringify(respResult).slice(0, 100)}`,
     );
 
     // Subscribe to progress events
-    await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
+    const progResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
       eventType: EVENT_TYPES.TASK_PROGRESS,
       subscriberId,
     });
-    console.error(`[mesh-bridge] Subscribed to ${EVENT_TYPES.TASK_PROGRESS}`);
+    console.error(
+      `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.TASK_PROGRESS} → ${JSON.stringify(progResult).slice(0, 100)}`,
+    );
 
     eventSubscriptionActive = true;
   } catch (error) {
-    console.error("[mesh-bridge] Failed to subscribe to events:", error);
+    console.error("[mesh-bridge] ❌ Failed to subscribe to events:", error);
   }
 }
 
