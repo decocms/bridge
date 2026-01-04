@@ -274,24 +274,16 @@ async function main() {
   const wsPort = config.wsPort;
   const wsServer = startWebSocketServer(wsPort);
 
-  // Log to stderr (stdout is for MCP protocol)
+  // Startup log - concise format
   const hasMeshAccess = !!(meshToken && meshUrl);
+  const domainList = domains.map((d) => d.id).join(", ");
   if (wsServer) {
-    console.error(`
-╔══════════════════════════════════════════════════════════════╗
-║               MESH BRIDGE v${BRIDGE_VERSION} (STDIO Mode)                 ║
-╠══════════════════════════════════════════════════════════════╣
-║  Transport: STDIO (mesh-hosted)                              ║
-║  WebSocket: ws://localhost:${wsPort}                            ║
-║  Domains:   ${domains
-      .map((d) => d.id)
-      .join(", ")
-      .padEnd(42)}║
-║  Mesh:      ${hasMeshAccess ? "✅ Connected".padEnd(42) : "❌ No credentials".padEnd(42)}║
-╚══════════════════════════════════════════════════════════════╝
-`);
+    console.error(`[mesh-bridge] Started v${BRIDGE_VERSION} (STDIO)`);
+    console.error(`[mesh-bridge]   WebSocket: ws://localhost:${wsPort}`);
+    console.error(`[mesh-bridge]   Domains: ${domainList}`);
+    console.error(`[mesh-bridge]   Mesh: ${hasMeshAccess ? "✅ connected" : "❌ no credentials"}`);
   } else {
-    console.error(`[mesh-bridge] Running in tool-fetch mode (WS server on another instance)`);
+    console.error(`[mesh-bridge] Tool-fetch mode (WS on another instance)`);
   }
 }
 

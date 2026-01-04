@@ -152,16 +152,17 @@ async function handleShortcutCommand(
       type: "send",
       id: message.id,
       chatId: message.chatId,
-      text: `${aiPrefix}*WhatsApp Bridge Commands*
+      text: `${aiPrefix}*WhatsApp Bridge*
 
+💬 Just type any message to chat with AI!
+
+*Local shortcuts:*
 📢 \`/say <text>\` - Speak aloud
-📁 \`/files [path]\` - List files
+📁 \`/files [path]\` - List files  
 📄 \`/read <file>\` - Read file
 🖥️ \`/apps\` - Running apps
 ⚙️ \`/run <cmd>\` - Run command
-🔔 \`/notify <msg>\` - Send notification
-
-💬 Just type a message to chat with AI!`,
+🔔 \`/notify <msg>\` - Send notification`,
     });
     return true;
   }
@@ -400,16 +401,22 @@ async function handleMessage(message: WhatsAppMessage, ctx: DomainContext): Prom
   }
   session.lastProcessedMessage = messageKey;
 
-  // Handle shortcut commands
+  // Handle shortcut commands (local, no AI needed)
   if (messageText.startsWith("/")) {
     const handled = await handleShortcutCommand(message, ctx);
     if (handled) return;
   }
 
-  // Strip command prefix
+  // Strip legacy command prefix if present (backwards compatibility)
   let userMessage = messageText;
   if (userMessage.startsWith("!") || userMessage.startsWith("-")) {
     userMessage = userMessage.slice(1).trim();
+  }
+
+  // Skip empty messages
+  if (!userMessage) {
+    console.error(`[whatsapp] Empty message after stripping prefix, skipping`);
+    return;
   }
 
   // Show processing state

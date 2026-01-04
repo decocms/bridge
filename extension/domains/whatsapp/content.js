@@ -965,14 +965,43 @@ async function sendWhatsAppImage(imageUrl, caption) {
  * This is the ONLY message we ever consider for processing.
  */
 function getLastMessage() {
-  // Find all message rows
-  const rows = document.querySelectorAll('div[data-id]');
+  // Find the message container (the scrollable area)
+  const container = document.querySelector('div[data-testid="conversation-panel-messages"]') ||
+                    document.querySelector('#main div[role="application"]');
+  
+  if (!container) {
+    // Fallback to old method
+    const rows = document.querySelectorAll('div[data-id]');
+    if (rows.length === 0) return null;
+    const lastRow = rows[rows.length - 1];
+    return extractMessageText(lastRow);
+  }
+  
+  // Get all message rows within the container
+  const rows = container.querySelectorAll('div[data-id]');
   if (rows.length === 0) return null;
   
-  // Get the LAST row
+  // Get the LAST row (bottom-most message)
   const lastRow = rows[rows.length - 1];
   
-  // Extract text from it
+  // Check if we're scrolled to the bottom (important!)
+  // If user scrolled up, we should NOT process old messages
+  const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 200;
+  
+  if (!isNearBottom) {
+    // User scrolled up - don't process anything
+    return lastSeenMessageText; // Return cached value to prevent processing
+  }
+  
+  return extractMessageText(lastRow);
+}
+
+/**
+ * Extract text content from a message row element
+ */
+function extractMessageText(row) {
+  if (!row) return null;
+  
   const textSelectors = [
     'span[data-testid="selectable-text"]',
     'span.selectable-text',
@@ -980,16 +1009,14 @@ function getLastMessage() {
     "span[dir='ltr']",
   ];
   
-  let text = "";
   for (const sel of textSelectors) {
-    const textEl = lastRow.querySelector(sel);
+    const textEl = row.querySelector(sel);
     if (textEl?.innerText?.trim()) {
-      text = textEl.innerText.trim();
-      break;
+      return textEl.innerText.trim();
     }
   }
   
-  return text || null;
+  return null;
 }
 
 /**
@@ -1039,35 +1066,69 @@ function startMessageObserver() {
       return;
     }
 
+    // Get the last message at the BOTTOM of the chat
     const currentLastMessage = getLastMessage();
     if (!currentLastMessage) return;
 
     // Same as before? Skip.
     if (currentLastMessage === lastSeenMessageText) return;
 
-    // Update cache immediately
+    // Update cache IMMEDIATELY to prevent loops
     lastSeenMessageText = currentLastMessage;
 
-    // ONLY process messages starting with ! or /
-    if (!isCommandForBridge(currentLastMessage)) {
-      // Not a command - ignore silently
+    // Check if this is a message we should process
+    if (!shouldProcessMessage(currentLastMessage)) {
+      // AI response or empty - ignore
+      debug("Ignoring AI response or empty message");
       return;
     }
 
-    // This is a command for the bridge!
-    debug("Command detected:", currentLastMessage.slice(0, 50));
+    // User message detected - send to bridge!
+    debug("User message:", currentLastMessage.slice(0, 50));
     processIncomingMessage(currentLastMessage, currentLastMessage);
   }, 500);
 }
 
 /**
- * Check if a message is a command for the bridge.
- * - `/` = shortcuts only (/say, /files, /tasks, etc.)
- * - `!` or `-` = AI commands
+ * Check if a message is from the AI (has robot prefix).
+ * AI responses ALWAYS start with 🤖 - this is our reliable marker.
  */
-function isCommandForBridge(text) {
+function isAIResponse(text) {
   const trimmed = text.trim();
-  return trimmed.startsWith("!") || trimmed.startsWith("-") || trimmed.startsWith("/");
+  return trimmed.startsWith("🤖");
+}
+
+/**
+ * Check if a message is a local shortcut command.
+ * These are handled natively by the bridge without AI.
+ */
+function isLocalShortcut(text) {
+  const trimmed = text.trim().toLowerCase();
+  return trimmed.startsWith("/say ") || 
+         trimmed.startsWith("/files") || 
+         trimmed.startsWith("/read ") ||
+         trimmed.startsWith("/apps") ||
+         trimmed.startsWith("/run ") ||
+         trimmed.startsWith("/notify ") ||
+         trimmed === "/help";
+}
+
+/**
+ * Check if a message should be processed by the bridge.
+ * 
+ * Logic:
+ * - If starts with 🤖 → AI response → IGNORE
+ * - If starts with / → Local shortcut → PROCESS
+ * - Otherwise → User message for AI → PROCESS
+ */
+function shouldProcessMessage(text) {
+  if (!text || text.trim().length === 0) return false;
+  
+  // AI responses are never processed (we sent them!)
+  if (isAIResponse(text)) return false;
+  
+  // Everything else is a user message
+  return true;
 }
 
 function stopMessageObserver() {
