@@ -31,8 +31,8 @@ let lastSeenMessageText = ""; // The LAST message we've seen - only this matters
 // Mode toggles
 let speakerMode = false; // When ON, AI speaks responses out loud
 
-// Agent mode (FAST = router, SMART = task execution)
-let agentMode = "FAST"; // "FAST" or "SMART"
+// Processing state (true when Pilot is working on a task)
+let isProcessing = false;
 
 // Global enable/disable toggle (persisted)
 let extensionEnabled = true;
@@ -82,11 +82,19 @@ function connectToBridge() {
       debug("WebSocket closed");
       bridgeConnected = false;
       sessionId = null;
-      updateStatusUI("disconnected");
+      updateStatusUI("reconnecting");
 
-      // Auto-reconnect
+      // Auto-reconnect IMMEDIATELY first, then every 2 seconds
+      // This handles hot reload scenarios where bridge restarts quickly
       if (!reconnectInterval) {
-        reconnectInterval = setInterval(connectToBridge, 5000);
+        // Try to reconnect immediately
+        setTimeout(() => {
+          debug("Attempting immediate reconnect...");
+          connectToBridge();
+        }, 500);
+        
+        // Then set up retry interval (faster: every 2 seconds)
+        reconnectInterval = setInterval(connectToBridge, 2000);
       }
     };
 
@@ -101,7 +109,10 @@ function connectToBridge() {
 function sendFrame(frame) {
   if (bridgeSocket?.readyState === WebSocket.OPEN) {
     bridgeSocket.send(JSON.stringify(frame));
+    return true;
   }
+  debug("Cannot send frame - not connected. Frame type:", frame.type);
+  return false;
 }
 
 function handleBridgeFrame(frame) {
@@ -205,9 +216,14 @@ function handleBridgeFrame(frame) {
       hideStopSpeakingButton();
       break;
 
-    case "agent_mode_changed":
-      debug("Agent mode changed:", frame.mode);
-      updateAgentMode(frame.mode);
+    case "processing_started":
+      debug("Processing started");
+      setProcessing(true);
+      break;
+
+    case "processing_ended":
+      debug("Processing ended");
+      setProcessing(false);
       break;
 
     case "agent_progress":
@@ -286,6 +302,15 @@ function createStatusBadge() {
         background: #00cc66;
         box-shadow: 0 0 4px #00cc66;
       }
+      #mesh-bridge-badge.reconnecting .status-dot {
+        background: #ffaa00;
+        box-shadow: 0 0 4px #ffaa00;
+        animation: blink-reconnect 0.5s infinite;
+      }
+      @keyframes blink-reconnect {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
       #mesh-bridge-badge .speaker-toggle {
         padding: 3px 10px;
         border-radius: 10px;
@@ -328,22 +353,21 @@ function createStatusBadge() {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.7; }
       }
-      #mesh-bridge-badge .mode-indicator {
-        padding: 3px 8px;
-        border-radius: 8px;
-        font-size: 9px;
-        font-weight: 600;
-        background: #1a3d4d;
-        color: #66aacc;
+      #mesh-bridge-badge .processing-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #444;
+        display: none;
       }
-      #mesh-bridge-badge .mode-indicator.smart {
-        background: #4d1a4d;
-        color: #cc66cc;
-        animation: pulse-smart 2s infinite;
+      #mesh-bridge-badge .processing-dot.active {
+        display: inline-block;
+        background: #66ccff;
+        animation: pulse-dot 1s infinite;
       }
-      @keyframes pulse-smart {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.7; }
+      @keyframes pulse-dot {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.3); opacity: 0.7; }
       }
       #mesh-bridge-badge .progress-indicator {
         font-size: 10px;
@@ -386,7 +410,7 @@ function createStatusBadge() {
       <span class="enable-toggle">ON</span>
       <span class="status-dot"></span>
       <span class="status-text">Bridge</span>
-      <span class="mode-indicator">⚡ FAST</span>
+      <span class="processing-dot"></span>
       <span class="progress-indicator"></span>
       <span class="speaker-toggle">🔇 Mute</span>
       <span class="stop-speaking">🛑 Stop</span>
@@ -481,43 +505,50 @@ function hideStopSpeakingButton() {
   }
 }
 
-function updateAgentMode(mode) {
-  agentMode = mode || "FAST";
+function setProcessing(active) {
+  isProcessing = active;
   
-  const indicator = document.querySelector("#mesh-bridge-badge .mode-indicator");
-  if (!indicator) return;
+  const dot = document.querySelector("#mesh-bridge-badge .processing-dot");
+  if (!dot) return;
   
-  if (mode === "SMART") {
-    indicator.textContent = "🧠 SMART";
-    indicator.className = "mode-indicator smart";
-    indicator.title = "Task execution mode - using smart model";
+  if (active) {
+    dot.classList.add("active");
   } else {
-    indicator.textContent = "⚡ FAST";
-    indicator.className = "mode-indicator";
-    indicator.title = "Router mode - using fast model";
+    dot.classList.remove("active");
+    // Clear progress after a short delay
+    setTimeout(() => {
+      const progress = document.querySelector("#mesh-bridge-badge .progress-indicator");
+      if (progress) progress.textContent = "";
+    }, 3000);
   }
   
-  debug("Agent mode updated:", mode);
+  debug("Processing:", active ? "started" : "ended");
 }
 
 function updateAgentProgress(message) {
+  // If we receive progress, we're processing
+  if (message && !message.includes("✅") && !message.includes("❌")) {
+    setProcessing(true);
+  }
+  
   const indicator = document.querySelector("#mesh-bridge-badge .progress-indicator");
   if (!indicator) {
     // Create progress indicator if it doesn't exist
     const badge = document.querySelector("#mesh-bridge-badge");
     if (badge) {
-      const progress = document.createElement("div");
+      const progress = document.createElement("span");
       progress.className = "progress-indicator";
       progress.textContent = message;
-      // Insert after mode indicator
-      const modeIndicator = badge.querySelector(".mode-indicator");
-      if (modeIndicator) {
-        modeIndicator.after(progress);
+      // Insert after processing dot
+      const procDot = badge.querySelector(".processing-dot");
+      if (procDot) {
+        procDot.after(progress);
       } else {
         badge.appendChild(progress);
       }
       // Auto-hide after 5 seconds if it's a completion message
       if (message.includes("✅") || message.includes("❌")) {
+        setProcessing(false);
         setTimeout(() => {
           progress.textContent = "";
         }, 5000);
@@ -528,8 +559,9 @@ function updateAgentProgress(message) {
   
   indicator.textContent = message;
   
-  // Auto-hide completion messages
+  // Auto-hide completion messages and end processing
   if (message.includes("✅") || message.includes("❌")) {
+    setProcessing(false);
     setTimeout(() => {
       indicator.textContent = "";
     }, 5000);
@@ -575,9 +607,15 @@ function updateStatusUI(status) {
 
   if (status === "connected") {
     badgeContainer.classList.add("connected");
+    badgeContainer.classList.remove("reconnecting");
     text.textContent = "Bridge";
+  } else if (status === "reconnecting") {
+    badgeContainer.classList.remove("connected");
+    badgeContainer.classList.add("reconnecting");
+    text.textContent = "Reconnecting...";
   } else {
     badgeContainer.classList.remove("connected");
+    badgeContainer.classList.remove("reconnecting");
     text.textContent = "Bridge ⚠️";
   }
 }
