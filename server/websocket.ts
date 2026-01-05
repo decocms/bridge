@@ -157,34 +157,29 @@ export async function handleIncomingEvents(
             error?: string;
             chatId?: string;
           };
-          
-          // Only handle if this is for the right chat or no specific chat
-          if (!taskData.chatId || taskData.chatId === session.domain) {
-            console.error(`[mesh-bridge]   ✅ Task completed: ${taskData.taskId}`);
-            
-            if (taskData.status === "completed" && taskData.result) {
-              // Send the result as a response
-              const resultText = typeof taskData.result === "string" 
-                ? taskData.result 
+
+          // Handle task completion - send result to user
+          console.error(
+            `[mesh-bridge]   ✅ Task completed: ${taskData.taskId} (status: ${taskData.status})`,
+          );
+
+          if (taskData.status === "completed" && taskData.result) {
+            // Send the result as a response
+            const resultText =
+              typeof taskData.result === "string"
+                ? taskData.result
                 : JSON.stringify(taskData.result);
-              const workflowName = taskData.workflowTitle || taskData.workflowId || "task";
-              
-              ctx.send({
-                type: "agent_progress",
-                message: `✅ ${workflowName} completed`,
-              });
-              
-              ctx.send({
-                type: "send",
-                id: `task-${taskData.taskId}`,
-                text: `🤖 ${resultText}`,
-              });
-            } else if (taskData.status === "failed") {
-              ctx.send({
-                type: "agent_progress",
-                message: `❌ ${taskData.workflowTitle || "Task"} failed: ${taskData.error || "Unknown error"}`,
-              });
-            }
+
+            ctx.send({
+              type: "send",
+              id: `task-${taskData.taskId}`,
+              text: `🤖 ${resultText}`,
+            });
+          } else if (taskData.status === "failed") {
+            ctx.send({
+              type: "agent_progress",
+              message: `❌ ${taskData.workflowTitle || "Task"} failed: ${taskData.error || "Unknown error"}`,
+            });
           }
         } else if (event.type === EVENT_TYPES.TASK_PROGRESS) {
           const progressData = event.data as TaskProgressEvent;

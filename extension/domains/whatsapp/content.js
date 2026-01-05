@@ -1095,6 +1095,22 @@ function startMessageObserver() {
     // Same as before? Skip.
     if (currentLastMessage === lastSeenMessageText) return;
 
+    // Check for message expansion ("Ler mais" / "Read more" clicks)
+    // If the new message is just a longer version of the old one, it's an expansion, not a new message
+    const isExpansion = (
+      // New message starts with what we had before (expansion)
+      currentLastMessage.startsWith(lastSeenMessageText.slice(0, 100)) ||
+      // Or old message starts with new (shouldn't happen, but defensive)
+      lastSeenMessageText.startsWith(currentLastMessage.slice(0, 100))
+    );
+    
+    if (isExpansion) {
+      // Just an expanded message - update cache but don't process
+      lastSeenMessageText = currentLastMessage;
+      debug("Message expansion detected, skipping");
+      return;
+    }
+
     // IMPORTANT: Check if AI response BEFORE updating cache
     // This prevents re-processing AI messages when switching chats
     if (isAIResponse(currentLastMessage)) {
