@@ -1113,6 +1113,47 @@ function extractMessageText(row) {
 }
 
 /**
+ * Check if newText is an expansion of oldText (user clicked "Read more" / "Ler mais")
+ * 
+ * Handles multiple expansion levels - when a message is very long, clicking "Read more"
+ * might reveal more text that ALSO has a "Read more" button.
+ * 
+ * Detection logic:
+ * 1. New text must be longer than old text
+ * 2. New text must start with (most of) the old text
+ * 3. Use a generous prefix match to handle minor formatting differences
+ */
+function isMessageExpansion(oldText, newText) {
+  if (!oldText || !newText) return false;
+  if (newText.length <= oldText.length) return false;
+  
+  // Normalize whitespace for comparison
+  const normalizeText = (t) => t.replace(/\s+/g, ' ').trim();
+  const oldNorm = normalizeText(oldText);
+  const newNorm = normalizeText(newText);
+  
+  // New text should be longer
+  if (newNorm.length <= oldNorm.length) return false;
+  
+  // Check if new text starts with old text (or most of it)
+  // Use 80% of old text as prefix to handle minor differences at truncation point
+  const prefixLength = Math.min(oldNorm.length, Math.floor(oldNorm.length * 0.8));
+  const oldPrefix = oldNorm.slice(0, prefixLength);
+  
+  if (newNorm.startsWith(oldPrefix)) {
+    return true;
+  }
+  
+  // Also check first N characters match (handles edge cases)
+  const checkLength = Math.min(100, oldNorm.length);
+  if (oldNorm.slice(0, checkLength) === newNorm.slice(0, checkLength)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
  * Reset state for new chat - just capture the current last message
  * Uses a grace period to let the DOM fully update after chat changes
  */
@@ -1191,22 +1232,15 @@ function startMessageObserver() {
     if (currentLastMessage === lastSeenMessageText) return;
 
     // Check for message expansion ("Ler mais" / "Read more" clicks)
-    // If the new message is just a longer version of the old one, it's an expansion, not a new message
-    // BUT: only skip if the message was actually processed before (not just seen during grace period)
-    const isExpansion = (
-      lastProcessedMessageText && // Only if we actually processed something
-      (
-        // New message starts with what we processed before (expansion)
-        currentLastMessage.startsWith(lastProcessedMessageText.slice(0, 100)) ||
-        // Or what we processed starts with new (shouldn't happen, but defensive)
-        lastProcessedMessageText.startsWith(currentLastMessage.slice(0, 100))
-      )
-    );
+    // If the new message is just a longer version of what we've seen, it's an expansion
+    // This handles MULTIPLE expansions (clicking "Read more" several times on very long messages)
+    const isExpansion = isMessageExpansion(lastSeenMessageText, currentLastMessage) ||
+                        isMessageExpansion(lastProcessedMessageText, currentLastMessage);
     
     if (isExpansion) {
       // Just an expanded message - update cache but don't process
       lastSeenMessageText = currentLastMessage;
-      debug("Message expansion detected (already processed), skipping");
+      debug("Message expansion detected, skipping");
       return;
     }
 
