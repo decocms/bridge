@@ -39,6 +39,7 @@ let extensionEnabled = true;
 
 // Grace period after chat changes - prevents processing stale messages
 let chatChangeGracePeriod = false;
+let lastProcessedMessageText = ""; // Track what was actually processed (not just seen)
 
 // =============================================================================
 // LOGGING
@@ -1031,6 +1032,9 @@ function resetObserverState() {
   lastSelfChatState = null;
   lastSelfChatName = null;
   
+  // Reset processed message tracking (so new messages after chat change get processed)
+  lastProcessedMessageText = "";
+  
   // Start grace period - don't process any messages for a bit
   chatChangeGracePeriod = true;
   
@@ -1097,17 +1101,21 @@ function startMessageObserver() {
 
     // Check for message expansion ("Ler mais" / "Read more" clicks)
     // If the new message is just a longer version of the old one, it's an expansion, not a new message
+    // BUT: only skip if the message was actually processed before (not just seen during grace period)
     const isExpansion = (
-      // New message starts with what we had before (expansion)
-      currentLastMessage.startsWith(lastSeenMessageText.slice(0, 100)) ||
-      // Or old message starts with new (shouldn't happen, but defensive)
-      lastSeenMessageText.startsWith(currentLastMessage.slice(0, 100))
+      lastProcessedMessageText && // Only if we actually processed something
+      (
+        // New message starts with what we processed before (expansion)
+        currentLastMessage.startsWith(lastProcessedMessageText.slice(0, 100)) ||
+        // Or what we processed starts with new (shouldn't happen, but defensive)
+        lastProcessedMessageText.startsWith(currentLastMessage.slice(0, 100))
+      )
     );
     
     if (isExpansion) {
       // Just an expanded message - update cache but don't process
       lastSeenMessageText = currentLastMessage;
-      debug("Message expansion detected, skipping");
+      debug("Message expansion detected (already processed), skipping");
       return;
     }
 
@@ -1131,6 +1139,7 @@ function startMessageObserver() {
 
     // User message detected - send to bridge!
     debug("User message:", currentLastMessage.slice(0, 50));
+    lastProcessedMessageText = currentLastMessage; // Track what we actually processed
     processIncomingMessage(currentLastMessage, currentLastMessage);
   }, 500);
 }
