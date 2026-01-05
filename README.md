@@ -304,6 +304,22 @@ Events are:
 - **Stable**: Event types don't change when UI changes
 - **Composable**: Any MCP can subscribe/publish
 
+## Recent Updates
+
+### Auto-Recovery from Extension Context Invalidation
+
+Chrome's Manifest V3 suspends service workers after ~30 seconds of inactivity. Previously, this would break the extension when returning to a tab after being away.
+
+**Now:** The content script monitors for context invalidation and automatically reloads the page when detected. No more "Extension context invalidated" errors requiring manual refresh.
+
+### Thread Continuity
+
+The bridge now works seamlessly with Pilot's thread management. Conversations within 5 minutes are treated as the same thread, enabling natural follow-ups like:
+
+- "draft this" → continues from previous research
+- "yes" / "continue" → proceeds to next workflow step
+- "new thread" → starts fresh
+
 ## Privacy
 
 - Runs **locally** on your machine

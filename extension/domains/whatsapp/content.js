@@ -15,6 +15,97 @@ const AI_PREFIX = "🤖 ";
 const DEBUG = true;
 
 // =============================================================================
+// EXTENSION CONTEXT VALIDATION
+// =============================================================================
+
+/**
+ * Check if the extension context is still valid.
+ * Manifest V3 service workers get suspended after ~30s of inactivity,
+ * which invalidates the context for content scripts.
+ */
+function isExtensionContextValid() {
+  try {
+    // This will throw if the context is invalidated
+    return chrome.runtime?.id != null;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Safe wrapper for chrome.storage.local operations.
+ * Returns undefined if the context is invalidated instead of throwing.
+ */
+async function safeStorageGet(keys) {
+  if (!isExtensionContextValid()) return {};
+  try {
+    return await chrome.storage.local.get(keys);
+  } catch (e) {
+    handleContextInvalidation();
+    return {};
+  }
+}
+
+async function safeStorageSet(items) {
+  if (!isExtensionContextValid()) return;
+  try {
+    await chrome.storage.local.set(items);
+  } catch (e) {
+    handleContextInvalidation();
+  }
+}
+
+/**
+ * Handle extension context invalidation.
+ * Auto-reloads the page since that's the cleanest fix.
+ */
+let contextInvalidationHandled = false;
+function handleContextInvalidation() {
+  if (contextInvalidationHandled) return;
+  contextInvalidationHandled = true;
+  
+  console.warn("[bridge] Extension context invalidated - auto-reloading page...");
+  
+  // Stop all operations that depend on the extension context
+  if (typeof stopMessageObserver === "function") {
+    try { stopMessageObserver(); } catch (e) {}
+  }
+  if (bridgeSocket) {
+    try { bridgeSocket.close(); } catch (e) {}
+    bridgeSocket = null;
+  }
+  if (reconnectInterval) {
+    clearInterval(reconnectInterval);
+    reconnectInterval = null;
+  }
+  if (contextCheckInterval) {
+    clearInterval(contextCheckInterval);
+    contextCheckInterval = null;
+  }
+  
+  // Auto-reload the page after a brief delay
+  // This is the cleanest solution - avoids stale state issues
+  setTimeout(() => {
+    window.location.reload();
+  }, 500);
+}
+
+/**
+ * Periodically check if the extension context is still valid.
+ * This catches invalidation when the user comes back to the tab.
+ */
+let contextCheckInterval = null;
+function startContextMonitor() {
+  if (contextCheckInterval) return;
+  
+  contextCheckInterval = setInterval(() => {
+    if (!isExtensionContextValid()) {
+      handleContextInvalidation();
+    }
+  }, 5000); // Check every 5 seconds
+}
+
+// =============================================================================
 // STATE
 // =============================================================================
 
@@ -463,7 +554,7 @@ function createStatusBadge() {
     
     // Persist state
     if (typeof chrome !== "undefined" && chrome.storage) {
-      chrome.storage.local.set({ meshBridgeEnabled: extensionEnabled });
+      safeStorageSet({ meshBridgeEnabled: extensionEnabled });
     }
     
     // Connect/disconnect and toggle observer
@@ -490,7 +581,7 @@ function createStatusBadge() {
 
   // Load persisted state and connect if enabled
   if (typeof chrome !== "undefined" && chrome.storage) {
-    chrome.storage.local.get(["meshBridgeEnabled"], (result) => {
+    safeStorageGet(["meshBridgeEnabled"]).then((result) => {
       if (result.meshBridgeEnabled === false) {
         extensionEnabled = false;
         badgeEl.classList.add("disabled");
@@ -1392,33 +1483,47 @@ function processIncomingMessage(messageId, text) {
 
 function init() {
   debug("Initializing WhatsApp domain...");
+  
+  // Start monitoring for extension context invalidation
+  startContextMonitor();
 
   // Create UI
   createStatusBadge();
 
   // Listen for toggle messages from background script (extension icon click)
   if (typeof chrome !== "undefined" && chrome.runtime) {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (message.action === "toggleEnabled") {
-        extensionEnabled = message.enabled;
-        updateEnableToggle();
-        debug("Extension toggled from icon:", extensionEnabled ? "ON" : "OFF");
-        
-        if (!extensionEnabled) {
-          stopMessageObserver();
-          // Disconnect WebSocket when disabled
-          if (bridgeSocket) {
-            bridgeSocket.close();
-            bridgeSocket = null;
-            bridgeConnected = false;
-          }
-        } else {
-          // Connect to bridge when enabled
-          connectToBridge();
-          startWhatsAppSetup();
+    try {
+      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        // Check if context is still valid before processing
+        if (!isExtensionContextValid()) {
+          handleContextInvalidation();
+          return;
         }
-      }
-    });
+        
+        if (message.action === "toggleEnabled") {
+          extensionEnabled = message.enabled;
+          updateEnableToggle();
+          debug("Extension toggled from icon:", extensionEnabled ? "ON" : "OFF");
+          
+          if (!extensionEnabled) {
+            stopMessageObserver();
+            // Disconnect WebSocket when disabled
+            if (bridgeSocket) {
+              bridgeSocket.close();
+              bridgeSocket = null;
+              bridgeConnected = false;
+            }
+          } else {
+            // Connect to bridge when enabled
+            connectToBridge();
+            startWhatsAppSetup();
+          }
+        }
+      });
+    } catch (e) {
+      // Context already invalidated at init time
+      handleContextInvalidation();
+    }
   }
 
   // Connection and setup happens in createStatusBadge after checking enabled state
