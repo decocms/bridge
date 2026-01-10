@@ -179,11 +179,15 @@ function handleFrame(frame: Record<string, unknown>): void {
       const text = (frame.text as string) || "";
       if (text && !text.includes("Connected to Mesh Bridge")) {
         // Display response with "pilot >" prefix in magenta
-        const timestamp = new Date().toLocaleTimeString("en-US", { hour12: false });
+        // Clear line first to avoid overlapping with readline prompt
+        process.stdout.write(c.clearLine);
+        const timestamp = formatTime();
         console.log(
           `${c.dim}${timestamp}${c.reset} ${c.magenta}${c.bold}pilot ❯${c.reset} ${text}`,
         );
         waitingForResponse = false;
+        // Reprint the prompt
+        if (rl) rl.prompt();
       }
       break;
     }
