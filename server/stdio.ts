@@ -300,7 +300,7 @@ async function main() {
   // Start WebSocket server for browser extensions
   // If port is already in use (another instance running), this returns null
   const wsPort = config.wsPort;
-  const wsServer = startWebSocketServer(wsPort);
+  const wsServer = await startWebSocketServer(wsPort);
 
   // Startup log - concise format
   const hasMeshAccess = !!(meshToken && meshUrl);

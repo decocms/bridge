@@ -46,7 +46,7 @@ registerDomain(whatsappDomain);
 registerDomain(cliDomain);
 
 // Start WebSocket server
-const server = startWebSocketServer(config.wsPort);
+const server = await startWebSocketServer(config.wsPort);
 
 // Banner
 const domains = getAllDomains();

@@ -603,15 +603,74 @@ function registerCleanupHandlers(): void {
 }
 
 // ============================================================================
+// Port Cleanup
+// ============================================================================
+
+/**
+ * Kill any existing process using the specified port.
+ * This handles zombie processes from previous runs.
+ */
+async function killProcessOnPort(port: number): Promise<void> {
+  try {
+    // Find process using the port (macOS/Linux)
+    const lsof = Bun.spawn(["lsof", "-ti", `:${port}`], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const output = await new Response(lsof.stdout).text();
+    const pids = output.trim().split("\n").filter(Boolean);
+
+    if (pids.length > 0) {
+      console.error(
+        `[mesh-bridge] Found ${pids.length} process(es) on port ${port}: ${pids.join(", ")}`,
+      );
+
+      for (const pid of pids) {
+        const pidNum = parseInt(pid, 10);
+        if (pidNum && pidNum !== process.pid) {
+          console.error(`[mesh-bridge] Killing process ${pidNum}...`);
+          try {
+            process.kill(pidNum, "SIGTERM");
+            // Give it a moment to die
+            await new Promise((resolve) => setTimeout(resolve, 100));
+            // Force kill if still alive
+            try {
+              process.kill(pidNum, 0); // Check if still alive
+              process.kill(pidNum, "SIGKILL");
+            } catch {
+              // Process is dead, good
+            }
+          } catch (e) {
+            // Process might already be dead
+            console.error(`[mesh-bridge] Could not kill ${pidNum}: ${e}`);
+          }
+        }
+      }
+
+      // Wait a bit for the port to be released
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  } catch {
+    // lsof not available or no processes found
+  }
+}
+
+// ============================================================================
 // Server
 // ============================================================================
 
-export function startWebSocketServer(port: number): ReturnType<typeof Bun.serve> | null {
+export async function startWebSocketServer(
+  port: number,
+): Promise<ReturnType<typeof Bun.serve> | null> {
   // Clean up any existing server first (in case of hot reload)
   if (wsServerInstance) {
     console.error("[mesh-bridge] Cleaning up existing server before restart...");
     stopWebSocketServer();
   }
+
+  // Kill any zombie processes from previous runs
+  await killProcessOnPort(port);
 
   // Start idempotency cache cleanup
   cleanupIntervalId = setInterval(cleanupIdempotencyCache, 60 * 1000);

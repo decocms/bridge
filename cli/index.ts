@@ -178,7 +178,11 @@ function handleFrame(frame: Record<string, unknown>): void {
     case "response": {
       const text = (frame.text as string) || "";
       if (text && !text.includes("Connected to Mesh Bridge")) {
-        log("←", c.cyan, text);
+        // Display response with "pilot >" prefix in magenta
+        const timestamp = new Date().toLocaleTimeString("en-US", { hour12: false });
+        console.log(
+          `${c.dim}${timestamp}${c.reset} ${c.magenta}${c.bold}pilot ❯${c.reset} ${text}`,
+        );
         waitingForResponse = false;
       }
       break;
