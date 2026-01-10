@@ -1,26 +1,18 @@
 #!/usr/bin/env bun
 /**
- * Mesh Bridge CLI - Unified Entry Point
+ * Mesh Bridge CLI
  *
- * Starts the WebSocket server AND provides an interactive CLI.
- * Other clients (browser extensions) connect via WebSocket.
+ * Terminal client for the Mesh Bridge.
+ * Connects to the WebSocket server (started by `bun stdio`).
  *
  * Usage:
- *   bun dev                       # Start server + interactive CLI
+ *   bun dev                       # Connect with default settings
  *   bun dev --monitor             # Monitor all events from all sources
- *   bun dev --port 9999           # Custom WebSocket port
- *   bun dev --headless            # Server only, no CLI (for background use)
+ *   bun dev --host localhost      # Custom host
+ *   bun dev --port 9999           # Custom port
  */
 
 import * as readline from "readline";
-import { config, validateConfig } from "../server/config.ts";
-import { registerDomain, getAllDomains, getDomain } from "../server/core/domain.ts";
-import { checkMeshAvailability, getMeshClient, isMeshReady } from "../server/core/mesh-client.ts";
-import { startWebSocketServer, stopWebSocketServer, sessions } from "../server/websocket.ts";
-import { whatsappDomain } from "../server/domains/whatsapp/index.ts";
-import { cliDomain } from "../server/domains/cli/index.ts";
-import type { Session, BridgeFrame } from "../server/core/protocol.ts";
-import type { DomainContext } from "../server/core/domain.ts";
 
 // ============================================================================
 // Configuration
@@ -28,11 +20,13 @@ import type { DomainContext } from "../server/core/domain.ts";
 
 const args = process.argv.slice(2);
 const monitorMode = args.includes("--monitor") || args.includes("-m");
-const headlessMode = args.includes("--headless") || args.includes("-H");
+const hostIdx = args.indexOf("--host");
 const portIdx = args.indexOf("--port");
-const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : config.wsPort;
+const host = hostIdx >= 0 ? args[hostIdx + 1] : "localhost";
+const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 9999;
 
-const BRIDGE_VERSION = "0.1.0";
+const WS_URL = `ws://${host}:${port}`;
+const CLIENT_VERSION = "1.0.0";
 
 // ============================================================================
 // Colors
@@ -57,22 +51,12 @@ const c = {
 // State
 // ============================================================================
 
+let ws: WebSocket | null = null;
+let sessionId: string | null = null;
+let isConnected = false;
+let chatId = `cli-${Date.now()}`;
 let rl: readline.Interface | null = null;
 let waitingForResponse = false;
-let chatId = `cli-${Date.now()}`;
-
-// Virtual session for CLI (not a WebSocket session)
-const cliSession: Session = {
-  id: `cli-local-${Date.now()}`,
-  client: "mesh-bridge-cli",
-  version: BRIDGE_VERSION,
-  domain: "cli",
-  capabilities: ["text", "monitor"],
-  connectedAt: new Date(),
-  lastActivity: new Date(),
-  conversations: new Map(),
-  monitorMode,
-};
 
 // ============================================================================
 // UI Helpers
@@ -82,8 +66,8 @@ function printBanner(): void {
   console.log(`
 ${c.green}╔════════════════════════════════════════════════════════════╗${c.reset}
 ${c.green}║${c.reset}                                                            ${c.green}║${c.reset}
-${c.green}║${c.reset}  ${c.bold}🌐 MESH BRIDGE${c.reset}                                          ${c.green}║${c.reset}
-${c.green}║${c.reset}  ${c.dim}Universal Bridge for MCP Mesh${c.reset}                           ${c.green}║${c.reset}
+${c.green}║${c.reset}  ${c.bold}🌐 MESH BRIDGE CLI${c.reset}                                      ${c.green}║${c.reset}
+${c.green}║${c.reset}  ${c.dim}Terminal Interface for Mesh Bridge${c.reset}                      ${c.green}║${c.reset}
 ${c.green}║${c.reset}                                                            ${c.green}║${c.reset}
 ${c.green}╚════════════════════════════════════════════════════════════╝${c.reset}
 `);
@@ -92,16 +76,15 @@ ${c.green}╚══════════════════════�
 function printHelp(): void {
   console.log(`
 ${c.cyan}Commands:${c.reset}
-  ${c.bold}/help${c.reset}        Show this help
-  ${c.bold}/new${c.reset}         Start new conversation thread
-  ${c.bold}/monitor${c.reset}     Toggle monitor mode (see all events)
-  ${c.bold}/status${c.reset}      Show connection status
-  ${c.bold}/clients${c.reset}     List connected clients
-  ${c.bold}/quit${c.reset}        Exit
+  ${c.bold}/help${c.reset}      Show this help
+  ${c.bold}/new${c.reset}       Start new thread
+  ${c.bold}/monitor${c.reset}   Toggle monitor mode (see all events)
+  ${c.bold}/status${c.reset}    Show connection status
+  ${c.bold}/quit${c.reset}      Exit CLI
 
 ${c.cyan}Tips:${c.reset}
   • Just type a message and press Enter to send to Pilot
-  • ${monitorMode ? `${c.green}Monitor mode is ON${c.reset}` : `Use ${c.bold}/monitor${c.reset} to see all events`}
+  • ${monitorMode ? `${c.green}Monitor mode is ON${c.reset}` : `Run with ${c.bold}--monitor${c.reset} to see all events`}
 `);
 }
 
@@ -126,94 +109,150 @@ function log(prefix: string, color: string, message: string, reprompt = true): v
   console.log(`${time} ${color}${prefix}${c.reset} ${message}`);
 
   // Reprint prompt if we're waiting for input
-  if (reprompt && rl && !headlessMode) {
-    process.stdout.write(PROMPT);
-  }
-}
-
-function logServer(message: string): void {
-  const time = c.dim + formatTime() + c.reset;
-  process.stdout.write(c.clearLine);
-  console.log(`${time} ${c.magenta}[server]${c.reset} ${message}`);
-  if (rl && !headlessMode) {
+  if (reprompt && rl) {
     process.stdout.write(PROMPT);
   }
 }
 
 // ============================================================================
-// Domain Context for CLI
+// WebSocket Client
 // ============================================================================
 
-function createCliContext(): DomainContext {
-  return {
-    meshClient: getMeshClient(),
-    session: cliSession,
-    send: (frame: BridgeFrame) => {
-      // Handle responses directly in CLI
-      switch (frame.type) {
-        case "send":
-          if (frame.text) {
-            log("🤖", c.green, frame.text);
-          }
-          waitingForResponse = false;
-          break;
-        case "response":
-          if (frame.text && !frame.text.includes("Connected to Mesh Bridge")) {
-            log("←", c.cyan, frame.text);
-          }
-          if (frame.isComplete) {
-            waitingForResponse = false;
-          }
-          break;
-        case "agent_progress":
-          if (frame.message) {
-            log("⚡", c.yellow, `${c.dim}${frame.message}${c.reset}`);
-          }
-          break;
-        case "error":
-          log("❌", c.red, frame.message || frame.code || "Unknown error");
-          waitingForResponse = false;
-          break;
+function connect(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    console.log(`${c.dim}Connecting to ${WS_URL}...${c.reset}`);
+
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      // Send connect frame
+      ws!.send(
+        JSON.stringify({
+          type: "connect",
+          client: "mesh-bridge-cli",
+          version: CLIENT_VERSION,
+          domain: "cli",
+          capabilities: ["text", "monitor"],
+        }),
+      );
+    };
+
+    ws.onmessage = (event) => {
+      handleFrame(JSON.parse(event.data));
+      if (!isConnected) {
+        isConnected = true;
+        resolve();
       }
-    },
-    config: {
-      aiPrefix: config.aiPrefix,
-    },
-  };
+    };
+
+    ws.onerror = (error) => {
+      console.error(`${c.red}WebSocket error:${c.reset}`, error);
+      if (!isConnected) {
+        reject(error);
+      }
+    };
+
+    ws.onclose = () => {
+      if (isConnected) {
+        console.log(`\n${c.yellow}Disconnected from bridge${c.reset}`);
+        process.exit(0);
+      }
+    };
+  });
 }
 
-// ============================================================================
-// Client Monitoring
-// ============================================================================
+function handleFrame(frame: Record<string, unknown>): void {
+  switch (frame.type) {
+    case "connected":
+      sessionId = frame.sessionId as string;
+      const domains = (frame.domains as Array<{ id: string; name: string }>) || [];
+      console.log(`${c.green}✓ Connected${c.reset} (session: ${sessionId})`);
+      console.log(`${c.dim}Domains: ${domains.map((d) => d.id).join(", ")}${c.reset}`);
+      if (monitorMode) {
+        console.log(`${c.yellow}👁️ Monitor mode active - showing all events${c.reset}`);
+        sendCommand("monitor");
+      }
+      printHelp();
+      break;
 
-function getConnectedClients(): Array<{ id: string; domain: string; since: Date }> {
-  const clients: Array<{ id: string; domain: string; since: Date }> = [];
+    case "response": {
+      const text = (frame.text as string) || "";
+      if (text && !text.includes("Connected to Mesh Bridge")) {
+        log("←", c.cyan, text);
+        waitingForResponse = false;
+      }
+      break;
+    }
 
-  for (const [, session] of sessions) {
-    clients.push({
-      id: session.id,
-      domain: session.domain,
-      since: session.connectedAt,
-    });
+    case "agent_progress": {
+      const progressMsg = (frame.message as string) || "";
+      log("⚡", c.yellow, `${c.dim}${progressMsg}${c.reset}`);
+      break;
+    }
+
+    case "send": {
+      // Response from agent (final response via send frame)
+      const sendText = (frame.text as string) || "";
+      log("🤖", c.green, sendText);
+      waitingForResponse = false;
+      break;
+    }
+
+    case "error": {
+      const errMsg = (frame.message as string) || (frame.code as string) || "Unknown error";
+      log("❌", c.red, errMsg);
+      waitingForResponse = false;
+      break;
+    }
+
+    case "pong":
+      // Ignore pong
+      break;
+
+    default:
+      // Log unknown frames for debugging
+      if (monitorMode) {
+        log("📩", c.magenta, `${c.dim}${JSON.stringify(frame)}${c.reset}`);
+      }
   }
-
-  return clients;
 }
 
-function printClients(): void {
-  const clients = getConnectedClients();
-
-  if (clients.length === 0) {
-    console.log(`${c.dim}No WebSocket clients connected${c.reset}`);
+function send(text: string): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.log(`${c.red}Not connected${c.reset}`);
     return;
   }
 
-  console.log(`\n${c.cyan}Connected clients:${c.reset}`);
-  for (const client of clients) {
-    const ago = Math.round((Date.now() - client.since.getTime()) / 1000);
-    console.log(`  ${c.bold}${client.domain}${c.reset} (${client.id}) - connected ${ago}s ago`);
+  ws.send(
+    JSON.stringify({
+      type: "message",
+      id: `msg-${Date.now()}`,
+      domain: "cli",
+      text,
+      chatId,
+      timestamp: Date.now(),
+    }),
+  );
+
+  log("→", c.blue, text, false); // Don't reprompt, we'll do it after
+  waitingForResponse = true;
+}
+
+function sendCommand(command: string, args?: Record<string, unknown>): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    console.log(`${c.red}Not connected${c.reset}`);
+    return;
   }
-  console.log();
+
+  ws.send(
+    JSON.stringify({
+      type: "command",
+      id: `cmd-${Date.now()}`,
+      domain: "cli",
+      command,
+      args,
+    }),
+  );
 }
 
 // ============================================================================
@@ -237,38 +276,20 @@ async function handleInput(line: string): Promise<boolean> {
       case "new":
       case "n":
         chatId = `cli-${Date.now()}`;
+        sendCommand("new_thread");
         console.log(`${c.cyan}🧹 Started new thread${c.reset}`);
         return true;
 
       case "monitor":
       case "m":
-        cliSession.monitorMode = !cliSession.monitorMode;
-        console.log(
-          cliSession.monitorMode
-            ? `${c.yellow}👁️ Monitor mode ON - showing all events${c.reset}`
-            : `${c.dim}Monitor mode OFF${c.reset}`,
-        );
+        sendCommand("monitor");
         return true;
 
       case "status":
-      case "s": {
-        const meshReady = isMeshReady();
-        const clients = getConnectedClients();
-        console.log(`\n${c.cyan}Status:${c.reset}`);
-        console.log(`  Session: ${cliSession.id}`);
-        console.log(`  WebSocket: ws://localhost:${port}`);
-        console.log(
-          `  Mesh: ${config.mesh.url} ${meshReady ? c.green + "✓" : c.red + "✗"}${c.reset}`,
-        );
-        console.log(`  Clients: ${clients.length} connected`);
-        console.log(`  Monitor: ${cliSession.monitorMode ? "ON" : "OFF"}`);
-        console.log();
-        return true;
-      }
-
-      case "clients":
-      case "c":
-        printClients();
+      case "s":
+        console.log(`${c.cyan}Session:${c.reset} ${sessionId}`);
+        console.log(`${c.cyan}Chat ID:${c.reset} ${chatId}`);
+        console.log(`${c.cyan}Bridge:${c.reset} ${WS_URL}`);
         return true;
 
       case "quit":
@@ -282,73 +303,8 @@ async function handleInput(line: string): Promise<boolean> {
     }
   }
 
-  // Regular message - send through domain handler
-  const domain = getDomain("cli");
-  if (!domain) {
-    log("❌", c.red, "CLI domain not registered");
-    return true;
-  }
-
-  const ctx = createCliContext();
-  log("→", c.blue, input, false);
-  waitingForResponse = true;
-
-  try {
-    await domain.handleMessage(
-      {
-        id: `msg-${Date.now()}`,
-        text: input,
-        chatId,
-        timestamp: Date.now(),
-      },
-      ctx,
-    );
-  } catch (error) {
-    log("❌", c.red, error instanceof Error ? error.message : "Unknown error");
-    waitingForResponse = false;
-  }
-
-  return true;
-}
-
-// ============================================================================
-// Server Setup
-// ============================================================================
-
-async function startServer(): Promise<boolean> {
-  validateConfig();
-
-  // Register domains
-  registerDomain(whatsappDomain);
-  registerDomain(cliDomain);
-
-  // Start WebSocket server
-  const server = startWebSocketServer(port);
-
-  if (!server) {
-    console.log(`${c.red}Failed to start server - port ${port} in use${c.reset}`);
-    console.log(`${c.dim}Another instance may be running${c.reset}`);
-    return false;
-  }
-
-  const domains = getAllDomains();
-  const domainList = domains.map((d) => d.id).join(", ");
-
-  console.log(`${c.green}✓${c.reset} Server started on port ${c.bold}${port}${c.reset}`);
-  console.log(`${c.dim}  Domains: ${domainList}${c.reset}`);
-
-  // Check mesh in background
-  setTimeout(async () => {
-    try {
-      const status = await checkMeshAvailability();
-      if (status.available) {
-        logServer(`Mesh connected ${c.green}✓${c.reset}`);
-      }
-    } catch {
-      logServer(`Mesh not available ${c.dim}(set MESH_API_KEY for standalone)${c.reset}`);
-    }
-  }, 500);
-
+  // Regular message
+  send(input);
   return true;
 }
 
@@ -359,23 +315,13 @@ async function startServer(): Promise<boolean> {
 async function main(): Promise<void> {
   printBanner();
 
-  // Start the server
-  const serverStarted = await startServer();
-  if (!serverStarted) {
+  try {
+    await connect();
+  } catch (error) {
+    console.error(`${c.red}Failed to connect to ${WS_URL}${c.reset}`);
+    console.error(`${c.dim}Make sure the bridge server is running (bun stdio)${c.reset}`);
     process.exit(1);
   }
-
-  // Headless mode - just keep the server running
-  if (headlessMode) {
-    console.log(`${c.dim}Running in headless mode. Press Ctrl+C to stop.${c.reset}`);
-    return; // Server keeps running
-  }
-
-  // Interactive mode
-  if (monitorMode) {
-    console.log(`${c.yellow}👁️ Monitor mode active${c.reset}`);
-  }
-  printHelp();
 
   rl = readline.createInterface({
     input: process.stdin,
@@ -389,8 +335,7 @@ async function main(): Promise<void> {
         prompt();
       } else {
         rl!.close();
-        stopWebSocketServer();
-        console.log(`\n${c.dim}Goodbye!${c.reset}`);
+        ws?.close();
         process.exit(0);
       }
     });

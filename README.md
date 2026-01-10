@@ -337,20 +337,32 @@ The bridge now works seamlessly with Pilot's thread management. Conversations wi
 
 ## Usage
 
-The default `bun dev` runs both the WebSocket server (for browser extensions) AND an interactive CLI:
+### Starting the Server
+
+The server runs via STDIO mode (for mesh integration) and also starts a WebSocket server for browser extensions:
 
 ```bash
-bun dev
+bun stdio        # Start server (STDIO + WebSocket on port 9999)
+bun dev:stdio    # Same, with hot reload
+```
+
+### CLI Client
+
+The CLI connects to the running server:
+
+```bash
+bun dev          # Connect to server
+bun dev:monitor  # Connect with all-events monitoring
 ```
 
 ```
 ╔════════════════════════════════════════════════════════════╗
-║  🌐 MESH BRIDGE                                            ║
-║  Universal Bridge for MCP Mesh                             ║
+║  🌐 MESH BRIDGE CLI                                        ║
+║  Terminal Interface for Mesh Bridge                        ║
 ╚════════════════════════════════════════════════════════════╝
 
-✓ Server started on port 9999
-  Domains: whatsapp, cli
+✓ Connected (session: cli-local-1736500000)
+Domains: whatsapp, cli
 
 you ❯ what's the weather in SF?
 07:24:59 → what's the weather in SF?
@@ -358,7 +370,7 @@ you ❯ what's the weather in SF?
 07:25:03 🤖 San Francisco is currently 58°F with fog...
 ```
 
-### Commands
+### CLI Commands
 
 | Command | Description |
 |---------|-------------|
@@ -366,26 +378,11 @@ you ❯ what's the weather in SF?
 | `/new` | Start new thread |
 | `/monitor` | Toggle monitor mode (see all events) |
 | `/status` | Show connection status |
-| `/clients` | List connected WebSocket clients |
 | `/quit` | Exit CLI |
-
-### Script Variants
-
-```bash
-bun dev              # Server + interactive CLI (default)
-bun dev:server       # Server only, no CLI (background mode)
-bun dev:monitor      # Server + CLI with all-events monitoring
-bun stdio            # STDIO mode (mesh-hosted, production)
-bun dev:stdio        # STDIO mode with hot reload
-```
 
 ### Monitor Mode
 
 With `--monitor` flag or `/monitor` command, CLI shows **all** events from all sources:
-
-```bash
-bun dev --monitor
-```
 
 ```
 07:24:55 [wa] → run article research for AI agents    # WhatsApp message
