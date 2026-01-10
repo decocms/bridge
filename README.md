@@ -24,18 +24,20 @@ A Chrome extension that maps DOM events to MCP Event Bus messages. AI agents can
 │  │  Process    │    │                 │    │  subscribe/     │   │
 │  │  Respond    │    │  Domains:       │    │  publish        │   │
 │  │             │    │  • WhatsApp ✅  │    │                 │   │
+│  │             │    │  • CLI ✅       │    │                 │   │
 │  └─────────────┘    └────────┬────────┘    └─────────────────┘   │
 │                              │                                    │
 └──────────────────────────────┼────────────────────────────────────┘
                                │ WebSocket
-                ┌──────────────▼──────────────┐
-                │     Chrome Extension        │
-                │                             │
-                │  • Observes DOM changes     │
-                │  • Extracts structured data │
-                │  • Injects AI responses     │
-                │  • Per-site content scripts │
-                └─────────────────────────────┘
+        ┌──────────────────────┼──────────────────────┐
+        │                      │                      │
+┌───────▼─────────────┐  ┌─────▼──────────────┐
+│  Chrome Extension   │  │  CLI (terminal)    │
+│                     │  │                    │
+│  • Observes DOM     │  │  • bun run cli     │
+│  • Injects AI text  │  │  • Monitor mode    │
+│  • Per-site scripts │  │  • Same events     │
+└─────────────────────┘  └────────────────────┘
 ```
 
 ## How It Works
@@ -258,8 +260,10 @@ MESH_API_KEY=your-key
 
 ```
 mesh-bridge/
+├── cli/
+│   └── index.ts          # Unified CLI + Server entry point
 ├── server/
-│   ├── index.ts          # Entry point
+│   ├── index.ts          # Auto-detect mode (stdio vs standalone)
 │   ├── websocket.ts      # WebSocket server
 │   ├── events.ts         # Event types
 │   ├── core/
@@ -267,7 +271,8 @@ mesh-bridge/
 │   │   ├── mesh-client.ts
 │   │   └── domain.ts     # Domain interface
 │   └── domains/
-│       └── whatsapp/     # WhatsApp implementation
+│       ├── whatsapp/     # WhatsApp implementation
+│       └── cli/          # CLI domain
 ├── extension/
 │   ├── manifest.json
 │   ├── background.js
@@ -281,14 +286,17 @@ mesh-bridge/
 ## Development
 
 ```bash
-# Run with hot reload
-bun run dev
+# Run with hot reload (server + CLI)
+bun dev
 
 # Run tests
 bun test
 
 # Format code
 bun run fmt
+
+# Type check
+bun run check
 ```
 
 ## Why Event-Driven?
@@ -327,11 +335,72 @@ The bridge now works seamlessly with Pilot's thread management. Conversations wi
 - Only processes **self-chat** in WhatsApp (never private conversations)
 - **Open source**—audit the code yourself
 
+## Usage
+
+The default `bun dev` runs both the WebSocket server (for browser extensions) AND an interactive CLI:
+
+```bash
+bun dev
+```
+
+```
+╔════════════════════════════════════════════════════════════╗
+║  🌐 MESH BRIDGE                                            ║
+║  Universal Bridge for MCP Mesh                             ║
+╚════════════════════════════════════════════════════════════╝
+
+✓ Server started on port 9999
+  Domains: whatsapp, cli
+
+you ❯ what's the weather in SF?
+07:24:59 → what's the weather in SF?
+07:25:01 ⚡ perplexity search
+07:25:03 🤖 San Francisco is currently 58°F with fog...
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show help |
+| `/new` | Start new thread |
+| `/monitor` | Toggle monitor mode (see all events) |
+| `/status` | Show connection status |
+| `/clients` | List connected WebSocket clients |
+| `/quit` | Exit CLI |
+
+### Script Variants
+
+```bash
+bun dev              # Server + interactive CLI (default)
+bun dev:server       # Server only, no CLI (background mode)
+bun dev:monitor      # Server + CLI with all-events monitoring
+bun stdio            # STDIO mode (mesh-hosted, production)
+bun dev:stdio        # STDIO mode with hot reload
+```
+
+### Monitor Mode
+
+With `--monitor` flag or `/monitor` command, CLI shows **all** events from all sources:
+
+```bash
+bun dev --monitor
+```
+
+```
+07:24:55 [wa] → run article research for AI agents    # WhatsApp message
+07:24:57 [wa] ⚡ perplexity search
+07:25:02 [wa] ← Started create-article-research
+07:25:10 [cli] → list my tasks                        # Your CLI message
+07:25:11 [cli] ← You have 3 active tasks...
+```
+
 ## Domains
 
 | Domain | Status | Description |
 |--------|--------|-------------|
 | WhatsApp | ✅ Ready | Self-chat AI interaction |
+| CLI | ✅ Ready | Terminal interface |
 | LinkedIn | 🔜 Planned | Messaging & networking |
 | X/Twitter | 🔜 Planned | Compose, DMs |
 | Gmail | 🔜 Planned | Compose, inbox |

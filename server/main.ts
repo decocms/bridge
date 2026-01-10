@@ -28,6 +28,7 @@ import { config, validateConfig } from "./config.ts";
 import { registerDomain, getAllDomains } from "./core/domain.ts";
 import { checkMeshAvailability } from "./core/mesh-client.ts";
 import { startWebSocketServer } from "./websocket.ts";
+import { cliDomain } from "./domains/cli/index.ts";
 
 // Import domains
 import { whatsappDomain } from "./domains/whatsapp/index.ts";
@@ -42,6 +43,7 @@ const BRIDGE_VERSION = "0.1.0";
 
 // Register domains
 registerDomain(whatsappDomain);
+registerDomain(cliDomain);
 
 // Start WebSocket server
 const server = startWebSocketServer(config.wsPort);

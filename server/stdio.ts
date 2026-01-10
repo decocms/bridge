@@ -24,6 +24,7 @@ import zodToJsonSchema from "zod-to-json-schema";
 import { setMeshRequestContext } from "./core/mesh-client.ts";
 import { config } from "./config.ts";
 import { registerDomain, getAllDomains } from "./core/domain.ts";
+import { cliDomain } from "./domains/cli/index.ts";
 
 // Import the WebSocket server starter
 import {
@@ -53,6 +54,22 @@ const BindingOf = (bindingType: string) =>
   });
 
 /**
+ * Tool definitions for EVENT_BUS binding.
+ * Used for tool-based connection matching (finds gateway's self-connection).
+ */
+const EVENT_BUS_BINDING_TOOLS = [{ name: "EVENT_PUBLISH" }, { name: "EVENT_SUBSCRIBE" }];
+
+/**
+ * Creates a binding with tool-based matching.
+ * Use for well-known bindings that aren't real MCP apps (like EVENT_BUS).
+ */
+const BindingWithTools = (bindingType: string) =>
+  z.object({
+    __type: z.literal(bindingType).default(bindingType),
+    value: z.string().describe("Connection ID"),
+  });
+
+/**
  * State schema for stdio mode bindings.
  * Defines what bindings we need from the mesh UI.
  *
@@ -63,7 +80,7 @@ const BindingOf = (bindingType: string) =>
  * Pilot handles all LLM/Connection/Tool logic.
  */
 const StdioStateSchema = z.object({
-  EVENT_BUS: BindingOf("@deco/event-bus").describe("Event bus for pub/sub with Pilot agent"),
+  EVENT_BUS: BindingWithTools("EVENT_BUS").describe("Event bus for pub/sub with Pilot agent"),
 });
 
 /**
@@ -129,6 +146,7 @@ async function main() {
 
   // Register domains
   registerDomain(whatsappDomain);
+  registerDomain(cliDomain);
 
   // Create MCP server
   const server = new McpServer({
@@ -153,9 +171,19 @@ async function main() {
     async () => {
       logTool("MCP_CONFIGURATION", {});
 
-      const stateSchema = zodToJsonSchema(StdioStateSchema, {
+      const rawStateSchema = zodToJsonSchema(StdioStateSchema, {
         $refStrategy: "none",
       });
+
+      // Inject __binding for tool-based matching
+      const stateSchema = rawStateSchema as Record<string, unknown>;
+      const props = stateSchema.properties as Record<string, Record<string, unknown>> | undefined;
+      if (props?.EVENT_BUS?.properties) {
+        const ebProps = props.EVENT_BUS.properties as Record<string, Record<string, unknown>>;
+        ebProps.__binding = {
+          const: EVENT_BUS_BINDING_TOOLS,
+        };
+      }
 
       const result = {
         stateSchema,

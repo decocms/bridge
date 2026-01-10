@@ -346,8 +346,18 @@ function handleBridgeFrame(frame) {
       break;
 
     case "send":
-      // AI response - send immediately
+      // AI response - ONLY send to self-chat for safety
       aiResponsePending = false;
+      
+      // CRITICAL: Never send AI responses to other chats!
+      if (!isSelfChat()) {
+        debug("⚠️ BLOCKED: Attempted to send AI response to non-self-chat!");
+        debug("   Current chat:", getChatName());
+        debug("   Message:", frame.text?.slice(0, 50));
+        // Don't send anything - this prevents accidental messages to wrong chats
+        break;
+      }
+      
       messageQueue.setResponse(frame.text);
       break;
 
@@ -381,7 +391,12 @@ function handleBridgeFrame(frame) {
             }, 200);
           }
         } else {
-          sendWhatsAppMessage(frame.text);
+          // CRITICAL: Only send responses to self-chat
+          if (!isSelfChat()) {
+            debug("⚠️ BLOCKED: Attempted to send response to non-self-chat!");
+          } else {
+            sendWhatsAppMessage(frame.text);
+          }
         }
       }
       aiResponsePending = false;

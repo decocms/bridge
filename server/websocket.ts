@@ -25,6 +25,10 @@ import {
 import { type DomainContext, getDomain, getAllDomains, findDomainForUrl } from "./core/domain.ts";
 import { EVENT_TYPES, type AgentResponseEvent, type TaskProgressEvent } from "./events.ts";
 import { handleAgentResponse, handleAgentProgress } from "./domains/whatsapp/index.ts";
+import {
+  handleAgentResponse as handleCliResponse,
+  handleAgentProgress as handleCliProgress,
+} from "./domains/cli/index.ts";
 
 const BRIDGE_VERSION = "0.1.0";
 
@@ -83,6 +87,15 @@ async function subscribeToEvents(): Promise<void> {
     });
     console.error(
       `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.RESPONSE_WHATSAPP} → ${JSON.stringify(respResult).slice(0, 100)}`,
+    );
+
+    // Subscribe to agent.response.cli events
+    const cliRespResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
+      eventType: EVENT_TYPES.RESPONSE_CLI,
+      subscriberId,
+    });
+    console.error(
+      `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.RESPONSE_CLI} → ${JSON.stringify(cliRespResult).slice(0, 100)}`,
     );
 
     // Subscribe to progress events
@@ -146,8 +159,11 @@ export async function handleIncomingEvents(
           );
           await handleAgentResponse(event.data as AgentResponseEvent, ctx);
           console.error(`[mesh-bridge]   ✅ Response handler completed`);
+        } else if (event.type === EVENT_TYPES.RESPONSE_CLI && session.domain === "cli") {
+          console.error(`[mesh-bridge]   ✅ Routing RESPONSE to CLI session ${session.id}`);
+          await handleCliResponse(event.data as AgentResponseEvent, ctx);
         } else if (event.type === EVENT_TYPES.TASK_COMPLETED && session.domain === "whatsapp") {
-          // Handle async workflow completion - send result to user
+          // Handle async workflow completion - ONLY if source is whatsapp
           const taskData = event.data as {
             taskId: string;
             workflowId?: string;
@@ -156,7 +172,17 @@ export async function handleIncomingEvents(
             result?: string;
             error?: string;
             chatId?: string;
+            source?: string;
           };
+
+          // CRITICAL: Only handle events that were sent FROM whatsapp
+          // Otherwise CLI/other sources get routed here incorrectly!
+          if (taskData.source !== "whatsapp") {
+            console.error(
+              `[mesh-bridge]   ⏭️ Skipping TASK_COMPLETED - source is "${taskData.source}", not "whatsapp"`,
+            );
+            continue;
+          }
 
           // Handle task completion - send result to user
           console.error(
@@ -183,8 +209,20 @@ export async function handleIncomingEvents(
           }
         } else if (event.type === EVENT_TYPES.TASK_PROGRESS) {
           const progressData = event.data as TaskProgressEvent;
-          if (progressData.source === session.domain || !progressData.source) {
-            await handleAgentProgress(progressData, ctx);
+          // Route progress to matching domain OR monitor mode sessions
+          if (progressData.source === session.domain) {
+            if (session.domain === "cli") {
+              await handleCliProgress(progressData, ctx);
+            } else if (session.domain === "whatsapp") {
+              await handleAgentProgress(progressData, ctx);
+            }
+          } else if (session.domain === "cli" && session.monitorMode) {
+            // CLI in monitor mode sees ALL progress
+            await handleCliProgress(progressData, ctx);
+          } else {
+            console.error(
+              `[mesh-bridge]   ⏭️ Skipping progress - source "${progressData.source}" != domain "${session.domain}"`,
+            );
           }
         } else {
           console.error(

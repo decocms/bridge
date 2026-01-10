@@ -199,6 +199,8 @@ export interface Session {
   activeGatewayId?: string;
   /** Active gateway name (for display) */
   activeGatewayName?: string;
+  /** CLI monitor mode - shows all events from all sources */
+  monitorMode?: boolean;
 }
 
 export interface ConversationMessage {

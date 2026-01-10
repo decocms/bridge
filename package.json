@@ -8,10 +8,12 @@
     "mesh-bridge": "./server/index.ts"
   },
   "scripts": {
-    "start": "bun server/index.ts",
-    "dev": "bun --watch server/index.ts",
+    "start": "bun cli/index.ts",
+    "dev": "bun --watch cli/index.ts",
+    "dev:server": "bun --watch cli/index.ts --headless",
+    "dev:monitor": "bun --watch cli/index.ts --monitor",
+    "stdio": "bun server/stdio.ts",
     "dev:stdio": "bun --watch server/stdio.ts",
-    "dev:standalone": "bun --watch server/main.ts",
     "test": "bun test",
     "test:mesh": "bun test server/core/mesh-client.test.ts",
     "check": "tsc --noEmit",
