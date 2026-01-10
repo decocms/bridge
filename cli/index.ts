@@ -242,7 +242,12 @@ function send(text: string): void {
     }),
   );
 
-  log("you ❯", c.green, text, false); // Don't reprompt, we'll do it after
+  // Move cursor up, clear line, and reprint with timestamp
+  process.stdout.write("\x1b[1A"); // Move up one line
+  process.stdout.write(c.clearLine); // Clear the line
+  const time = c.dim + formatTime() + c.reset;
+  console.log(`${time} ${c.green}you ❯${c.reset} ${text}`);
+
   waitingForResponse = true;
 }
 
