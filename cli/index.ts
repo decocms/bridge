@@ -288,9 +288,8 @@ async function handleInput(line: string): Promise<boolean> {
 
       case "new":
       case "n":
-        chatId = `cli-${Date.now()}`;
-        sendCommand("new_thread");
-        console.log(`${c.cyan}🧹 Started new thread${c.reset}`);
+        // Send /new to Pilot to close current thread
+        send("/new");
         return true;
 
       case "monitor":
