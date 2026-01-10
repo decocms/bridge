@@ -126,6 +126,7 @@ export const whatsappDomain: Domain = {
 | Domain | Status | Description |
 |--------|--------|-------------|
 | `whatsapp/` | ✅ Ready | Self-chat AI interaction |
+| `cli/` | ✅ Ready | Terminal interface |
 
 ### Extension (`extension/`)
 
@@ -246,7 +247,7 @@ export const whatsappDomain: Domain = {
    - Set up DOM observers
    - Handle incoming commands
 
-3. **Register domain** (in `server/main.ts`)
+3. **Register domain** (in `server/stdio.ts`)
 4. **Update manifest** (`extension/manifest.json`)
 
 See [README.md](../README.md) for detailed examples.
@@ -259,15 +260,23 @@ Mesh spawns the bridge as a child process:
 
 ```
 Mesh → STDIO → mesh-bridge → WebSocket → Extension
+                    ↑
+                    └── CLI connects here too
 ```
 
 - Credentials passed via environment
 - No API key needed
 - Automatic lifecycle management
+- CLI and browser extension are both WebSocket clients
+
+```bash
+bun stdio        # Start server
+bun dev          # Connect CLI client
+```
 
 ### Standalone Mode
 
-Bridge runs independently:
+Bridge runs independently (for development):
 
 ```
 mesh-bridge → HTTP → Mesh API
@@ -275,4 +284,4 @@ mesh-bridge → HTTP → Mesh API
 
 - Requires `MESH_API_KEY`
 - Manual startup
-- Useful for development
+- Useful for development without mesh

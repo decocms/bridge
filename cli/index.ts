@@ -4,6 +4,7 @@
  *
  * Terminal client for the Mesh Bridge.
  * Connects to the WebSocket server (started by `bun stdio`).
+ * Auto-reconnects on connection loss.
  *
  * Usage:
  *   bun dev                       # Connect with default settings
@@ -27,6 +28,11 @@ const port = portIdx >= 0 ? parseInt(args[portIdx + 1], 10) : 9999;
 
 const WS_URL = `ws://${host}:${port}`;
 const CLIENT_VERSION = "1.0.0";
+
+// Reconnection settings
+const RECONNECT_INITIAL_DELAY = 1000; // 1 second
+const RECONNECT_MAX_DELAY = 30000; // 30 seconds
+const RECONNECT_BACKOFF = 1.5; // Exponential backoff multiplier
 
 // ============================================================================
 // Colors
@@ -57,6 +63,9 @@ let isConnected = false;
 let chatId = `cli-${Date.now()}`;
 let rl: readline.Interface | null = null;
 let waitingForResponse = false;
+let reconnectAttempts = 0;
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let isShuttingDown = false;
 
 // ============================================================================
 // UI Helpers
@@ -80,6 +89,7 @@ ${c.cyan}Commands:${c.reset}
   ${c.bold}/new${c.reset}       Start new thread
   ${c.bold}/monitor${c.reset}   Toggle monitor mode (see all events)
   ${c.bold}/status${c.reset}    Show connection status
+  ${c.bold}/reconnect${c.reset} Force reconnection
   ${c.bold}/quit${c.reset}      Exit CLI
 
 ${c.cyan}Tips:${c.reset}
@@ -114,15 +124,68 @@ function log(prefix: string, color: string, message: string, reprompt = true): v
   }
 }
 
+function statusLog(message: string): void {
+  process.stdout.write(c.clearLine);
+  console.log(`${c.dim}${formatTime()}${c.reset} ${c.yellow}⚡${c.reset} ${message}`);
+  if (rl && isConnected) {
+    process.stdout.write(PROMPT);
+  }
+}
+
 // ============================================================================
-// WebSocket Client
+// WebSocket Client with Reconnection
 // ============================================================================
+
+function getReconnectDelay(): number {
+  const delay = Math.min(
+    RECONNECT_INITIAL_DELAY * Math.pow(RECONNECT_BACKOFF, reconnectAttempts),
+    RECONNECT_MAX_DELAY
+  );
+  return delay;
+}
+
+function scheduleReconnect(): void {
+  if (isShuttingDown) return;
+  
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+  }
+  
+  const delay = getReconnectDelay();
+  reconnectAttempts++;
+  
+  statusLog(`${c.dim}Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})...${c.reset}`);
+  
+  reconnectTimeout = setTimeout(() => {
+    connect().catch(() => {
+      // Connection failed, will trigger another reconnect via onclose/onerror
+    });
+  }, delay);
+}
 
 function connect(): Promise<void> {
   return new Promise((resolve, reject) => {
-    console.log(`${c.dim}Connecting to ${WS_URL}...${c.reset}`);
+    if (isShuttingDown) {
+      reject(new Error("Shutting down"));
+      return;
+    }
+    
+    // Clean up existing connection
+    if (ws) {
+      try {
+        ws.close();
+      } catch {
+        // Ignore
+      }
+      ws = null;
+    }
+    
+    if (reconnectAttempts === 0) {
+      console.log(`${c.dim}Connecting to ${WS_URL}...${c.reset}`);
+    }
 
     ws = new WebSocket(WS_URL);
+    let connectionResolved = false;
 
     ws.onopen = () => {
       // Send connect frame
@@ -139,24 +202,46 @@ function connect(): Promise<void> {
 
     ws.onmessage = (event) => {
       handleFrame(JSON.parse(event.data));
-      if (!isConnected) {
+      if (!connectionResolved) {
+        connectionResolved = true;
         isConnected = true;
+        reconnectAttempts = 0; // Reset on successful connection
         resolve();
       }
     };
 
-    ws.onerror = (error) => {
-      console.error(`${c.red}WebSocket error:${c.reset}`, error);
-      if (!isConnected) {
-        reject(error);
+    ws.onerror = () => {
+      // Don't log every error during reconnection attempts
+      if (reconnectAttempts === 0) {
+        statusLog(`${c.red}Connection error${c.reset}`);
+      }
+      
+      if (!connectionResolved) {
+        connectionResolved = true;
+        reject(new Error("Connection failed"));
       }
     };
 
     ws.onclose = () => {
-      if (isConnected) {
-        console.log(`\n${c.yellow}Disconnected from bridge${c.reset}`);
-        process.exit(0);
+      const wasConnected = isConnected;
+      isConnected = false;
+      
+      if (!connectionResolved) {
+        connectionResolved = true;
+        reject(new Error("Connection closed"));
+        return;
       }
+      
+      if (isShuttingDown) {
+        return;
+      }
+      
+      if (wasConnected) {
+        statusLog(`${c.yellow}Disconnected from bridge${c.reset}`);
+      }
+      
+      // Schedule reconnection
+      scheduleReconnect();
     };
   });
 }
@@ -166,28 +251,30 @@ function handleFrame(frame: Record<string, unknown>): void {
     case "connected":
       sessionId = frame.sessionId as string;
       const domains = (frame.domains as Array<{ id: string; name: string }>) || [];
-      console.log(`${c.green}✓ Connected${c.reset} (session: ${sessionId})`);
-      console.log(`${c.dim}Domains: ${domains.map((d) => d.id).join(", ")}${c.reset}`);
-      if (monitorMode) {
-        console.log(`${c.yellow}👁️ Monitor mode active - showing all events${c.reset}`);
-        sendCommand("monitor");
+      
+      if (reconnectAttempts === 0) {
+        // First connection
+        console.log(`${c.green}✓ Connected${c.reset} (session: ${sessionId})`);
+        console.log(`${c.dim}Domains: ${domains.map((d) => d.id).join(", ")}${c.reset}`);
+        if (monitorMode) {
+          console.log(`${c.yellow}👁️ Monitor mode active - showing all events${c.reset}`);
+          sendCommand("monitor");
+        }
+        printHelp();
+      } else {
+        // Reconnection
+        statusLog(`${c.green}Reconnected${c.reset} (session: ${sessionId})`);
+        if (monitorMode) {
+          sendCommand("monitor");
+        }
       }
-      printHelp();
       break;
 
     case "response": {
       const text = (frame.text as string) || "";
       if (text && !text.includes("Connected to Mesh Bridge")) {
-        // Display response with "pilot >" prefix in magenta
-        // Clear line first to avoid overlapping with readline prompt
-        process.stdout.write(c.clearLine);
-        const timestamp = formatTime();
-        console.log(
-          `${c.dim}${timestamp}${c.reset} ${c.magenta}${c.bold}pilot ❯${c.reset} ${text}`,
-        );
+        log("←", c.cyan, text);
         waitingForResponse = false;
-        // Reprint the prompt
-        if (rl) rl.prompt();
       }
       break;
     }
@@ -227,7 +314,7 @@ function handleFrame(frame: Record<string, unknown>): void {
 
 function send(text: string): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.log(`${c.red}Not connected${c.reset}`);
+    console.log(`${c.red}Not connected${c.reset} ${c.dim}(waiting for reconnection...)${c.reset}`);
     return;
   }
 
@@ -242,12 +329,7 @@ function send(text: string): void {
     }),
   );
 
-  // Move cursor up, clear line, and reprint with timestamp
-  process.stdout.write("\x1b[1A"); // Move up one line
-  process.stdout.write(c.clearLine); // Clear the line
-  const time = c.dim + formatTime() + c.reset;
-  console.log(`${time} ${c.green}you ❯${c.reset} ${text}`);
-
+  log("→", c.blue, text, false); // Don't reprompt, we'll do it after
   waitingForResponse = true;
 }
 
@@ -288,8 +370,9 @@ async function handleInput(line: string): Promise<boolean> {
 
       case "new":
       case "n":
-        // Send /new to Pilot to close current thread
-        send("/new");
+        chatId = `cli-${Date.now()}`;
+        sendCommand("new_thread");
+        console.log(`${c.cyan}🧹 Started new thread${c.reset}`);
         return true;
 
       case "monitor":
@@ -299,9 +382,26 @@ async function handleInput(line: string): Promise<boolean> {
 
       case "status":
       case "s":
-        console.log(`${c.cyan}Session:${c.reset} ${sessionId}`);
+        console.log(`${c.cyan}Session:${c.reset} ${sessionId || "(not connected)"}`);
         console.log(`${c.cyan}Chat ID:${c.reset} ${chatId}`);
         console.log(`${c.cyan}Bridge:${c.reset} ${WS_URL}`);
+        console.log(`${c.cyan}Connected:${c.reset} ${isConnected ? c.green + "yes" : c.red + "no"}${c.reset}`);
+        if (!isConnected && reconnectAttempts > 0) {
+          console.log(`${c.cyan}Reconnect attempts:${c.reset} ${reconnectAttempts}`);
+        }
+        return true;
+
+      case "reconnect":
+      case "r":
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = null;
+        }
+        reconnectAttempts = 0;
+        console.log(`${c.cyan}Forcing reconnection...${c.reset}`);
+        connect().catch(() => {
+          // Will auto-retry
+        });
         return true;
 
       case "quit":
@@ -327,18 +427,30 @@ async function handleInput(line: string): Promise<boolean> {
 async function main(): Promise<void> {
   printBanner();
 
-  try {
-    await connect();
-  } catch (error) {
-    console.error(`${c.red}Failed to connect to ${WS_URL}${c.reset}`);
-    console.error(`${c.dim}Make sure the bridge server is running (bun stdio)${c.reset}`);
-    process.exit(1);
-  }
-
+  // Set up readline first so we can show prompts during reconnection
   rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
   });
+
+  // Handle Ctrl+C gracefully
+  rl.on("close", () => {
+    isShuttingDown = true;
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+    }
+    ws?.close();
+    console.log(`\n${c.dim}Goodbye!${c.reset}`);
+    process.exit(0);
+  });
+
+  // Start connection (will auto-retry on failure)
+  try {
+    await connect();
+  } catch {
+    // First connection failed, but we'll keep trying
+    statusLog(`${c.dim}Waiting for bridge server...${c.reset}`);
+  }
 
   const prompt = () => {
     rl!.question(PROMPT, async (answer) => {
@@ -346,8 +458,13 @@ async function main(): Promise<void> {
       if (shouldContinue) {
         prompt();
       } else {
+        isShuttingDown = true;
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+        }
         rl!.close();
         ws?.close();
+        console.log(`\n${c.dim}Goodbye!${c.reset}`);
         process.exit(0);
       }
     });

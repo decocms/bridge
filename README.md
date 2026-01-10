@@ -34,9 +34,9 @@ A Chrome extension that maps DOM events to MCP Event Bus messages. AI agents can
 ┌───────▼─────────────┐  ┌─────▼──────────────┐
 │  Chrome Extension   │  │  CLI (terminal)    │
 │                     │  │                    │
-│  • Observes DOM     │  │  • bun run cli     │
+│  • Observes DOM     │  │  • bun dev         │
 │  • Injects AI text  │  │  • Monitor mode    │
-│  • Per-site scripts │  │  • Same events     │
+│  • Per-site scripts │  │  • Auto-reconnect  │
 └─────────────────────┘  └────────────────────┘
 ```
 
@@ -261,8 +261,9 @@ MESH_API_KEY=your-key
 ```
 mesh-bridge/
 ├── cli/
-│   └── index.ts          # Unified CLI + Server entry point
+│   └── index.ts          # CLI client (connects to server via WebSocket)
 ├── server/
+│   ├── stdio.ts          # STDIO mode (mesh-hosted, starts WebSocket server)
 │   ├── index.ts          # Auto-detect mode (stdio vs standalone)
 │   ├── websocket.ts      # WebSocket server
 │   ├── events.ts         # Event types
@@ -286,7 +287,10 @@ mesh-bridge/
 ## Development
 
 ```bash
-# Run with hot reload (server + CLI)
+# Start server (STDIO mode)
+bun stdio
+
+# CLI client (connects to server)
 bun dev
 
 # Run tests
@@ -378,6 +382,7 @@ you ❯ what's the weather in SF?
 | `/new` | Start new thread |
 | `/monitor` | Toggle monitor mode (see all events) |
 | `/status` | Show connection status |
+| `/reconnect` | Force reconnection to server |
 | `/quit` | Exit CLI |
 
 ### Monitor Mode
