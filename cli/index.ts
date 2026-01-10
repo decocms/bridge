@@ -242,7 +242,7 @@ function send(text: string): void {
     }),
   );
 
-  log("→", c.blue, text, false); // Don't reprompt, we'll do it after
+  log("you ❯", c.green, text, false); // Don't reprompt, we'll do it after
   waitingForResponse = true;
 }
 
