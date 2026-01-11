@@ -165,6 +165,16 @@ export interface ToolResultFrame {
   success: boolean;
 }
 
+export interface AgentInfoFrame {
+  type: "agent_info";
+  /** Agent gateway information */
+  agent: {
+    id: string;
+    title: string;
+    tools: Array<{ name: string; description?: string }>;
+  };
+}
+
 export type BridgeFrame =
   | ConnectedFrame
   | ResponseFrame
@@ -172,7 +182,8 @@ export type BridgeFrame =
   | PongFrame
   | ErrorFrame
   | BridgeEventFrame
-  | ToolResultFrame;
+  | ToolResultFrame
+  | AgentInfoFrame;
 
 // ============================================================================
 // Session

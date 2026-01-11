@@ -251,11 +251,25 @@ function handleFrame(frame: Record<string, unknown>): void {
     case "connected":
       sessionId = frame.sessionId as string;
       const domains = (frame.domains as Array<{ id: string; name: string }>) || [];
+      const mesh = frame.mesh as {
+        available?: boolean;
+        hasLLM?: boolean;
+        tools?: string[];
+        agent?: {
+          id: string;
+          title: string;
+          tools: Array<{ name: string; description?: string }>;
+        } | null;
+      } | undefined;
       
       if (reconnectAttempts === 0) {
         // First connection
         console.log(`${c.green}✓ Connected${c.reset} (session: ${sessionId})`);
         console.log(`${c.dim}Domains: ${domains.map((d) => d.id).join(", ")}${c.reset}`);
+        
+        // Agent info will arrive asynchronously via agent_info frame
+        // No need to show warning here since it arrives shortly after connection
+        
         if (monitorMode) {
           console.log(`${c.yellow}👁️ Monitor mode active - showing all events${c.reset}`);
           sendCommand("monitor");
@@ -303,6 +317,43 @@ function handleFrame(frame: Record<string, unknown>): void {
     case "pong":
       // Ignore pong
       break;
+
+    case "agent_info": {
+      // #region debug log
+      fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'cli/index.ts:341',message:'Received agent_info frame',data:{hasAgent:!!frame.agent},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+
+      const agent = frame.agent as {
+        id: string;
+        title: string;
+        tools: Array<{ name: string; description?: string }>;
+      };
+      const toolCount = agent.tools.length;
+      
+      // Clear current line and print agent info (multi-line output)
+      process.stdout.write(c.clearLine);
+      console.log(`\n${c.cyan}🤖 Agent Gateway: ${c.bold}${agent.title}${c.reset} ${c.dim}(${agent.id.slice(0, 12)}...)${c.reset}`);
+      console.log(`${c.dim}   ${toolCount} tool${toolCount !== 1 ? "s" : ""} available${c.reset}`);
+      
+      if (agent.tools.length > 0) {
+        // Show first 8 tools
+        const toolsToShow = agent.tools.slice(0, 8);
+        for (const tool of toolsToShow) {
+          const desc = tool.description ? ` ${c.dim}- ${tool.description.slice(0, 60)}${tool.description.length > 60 ? "..." : ""}${c.reset}` : "";
+          console.log(`   ${c.gray}•${c.reset} ${c.yellow}${tool.name}${c.reset}${desc}`);
+        }
+        if (agent.tools.length > 8) {
+          console.log(`   ${c.dim}... and ${agent.tools.length - 8} more${c.reset}`);
+        }
+      }
+      console.log(); // Empty line for spacing
+      
+      // Reprint prompt if readline is active
+      if (rl && isConnected) {
+        process.stdout.write(PROMPT);
+      }
+      break;
+    }
 
     default:
       // Log unknown frames for debugging

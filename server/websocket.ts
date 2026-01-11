@@ -98,6 +98,15 @@ async function subscribeToEvents(): Promise<void> {
       `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.RESPONSE_CLI} → ${JSON.stringify(cliRespResult).slice(0, 100)}`,
     );
 
+    // Subscribe to agent.info.response events
+    const agentInfoResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
+      eventType: EVENT_TYPES.AGENT_INFO_RESPONSE,
+      subscriberId,
+    });
+    console.error(
+      `[mesh-bridge] ✅ Subscribed to ${EVENT_TYPES.AGENT_INFO_RESPONSE} → ${JSON.stringify(agentInfoResult).slice(0, 100)}`,
+    );
+
     // Subscribe to progress events
     const progResult = await callMeshTool(eventBusId, "EVENT_SUBSCRIBE", {
       eventType: EVENT_TYPES.TASK_PROGRESS,
@@ -223,6 +232,29 @@ export async function handleIncomingEvents(
             console.error(
               `[mesh-bridge]   ⏭️ Skipping progress - source "${progressData.source}" != domain "${session.domain}"`,
             );
+          }
+        } else if (event.type === EVENT_TYPES.AGENT_INFO_RESPONSE) {
+          // #region debug log
+          fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:236',message:'Received AGENT_INFO_RESPONSE',data:{eventId:event.id,sessionDomain:session.domain,hasData:!!event.data},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+
+          // Agent info response - send to CLI sessions
+          if (session.domain === "cli") {
+            const agentInfo = event.data as {
+              id: string;
+              title: string;
+              tools: Array<{ name: string; description?: string }>;
+            };
+            
+            // #region debug log
+            fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:244',message:'Sending agent_info frame to CLI',data:{agentId:agentInfo.id,agentTitle:agentInfo.title,toolsCount:agentInfo.tools.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+
+            ctx.send({
+              type: "agent_info",
+              agent: agentInfo,
+            });
+            console.error(`[mesh-bridge]   ✅ Sent agent info to CLI session ${session.id}`);
           }
         } else {
           console.error(
@@ -355,7 +387,45 @@ async function handleConnect(
     await domain.onConnect(ctx);
   }
 
+  // Request agent gateway info via event system
+  // Pilot will respond with agent.info.response event
+  // #region debug log
+  fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:383',message:'Requesting agent info',data:{meshAvailable:meshStatus?.available,hasEventBus:!!getEventBusBindingId(),sessionId:session.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
+  if (meshStatus?.available) {
+    const eventBusId = getEventBusBindingId();
+    if (eventBusId) {
+      try {
+        // #region debug log
+        fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:387',message:'Publishing AGENT_INFO_REQUEST',data:{eventType:EVENT_TYPES.AGENT_INFO_REQUEST,eventBusId,sessionId:session.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+
+        await callMeshTool(eventBusId, "EVENT_PUBLISH", {
+          type: EVENT_TYPES.AGENT_INFO_REQUEST,
+          source: "mesh-bridge",
+          data: {
+            requestId: session.id,
+            source: "cli",
+          },
+        });
+        console.error(`[mesh-bridge] 📤 Requested agent info via event system`);
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        // #region debug log
+        fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:397',message:'Failed to publish AGENT_INFO_REQUEST',data:{error:errMsg},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        console.error(`[mesh-bridge] Failed to request agent info: ${error}`);
+      }
+    } else {
+      // #region debug log
+      fetch('http://127.0.0.1:7242/ingest/8397b2ea-9df9-487e-9ffa-b17eb1bfd701',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'websocket.ts:400',message:'No eventBusId available',data:{meshAvailable:meshStatus?.available},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+    }
+  }
+
   // Send connected response
+  // Note: Agent info will arrive via agent_info event frame after Pilot responds
   const connectedFrame = {
     type: "connected" as const,
     sessionId: session.id,

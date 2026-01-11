@@ -12,6 +12,7 @@
 export const EVENT_TYPES = {
   // Outgoing (Bridge publishes)
   USER_MESSAGE: "user.message.received",
+  AGENT_INFO_REQUEST: "bridge.agent.info.requested",
 
   // Incoming (Bridge subscribes to)
   TASK_CREATED: "agent.task.created",
@@ -24,6 +25,9 @@ export const EVENT_TYPES = {
   // Interface-specific responses
   RESPONSE_WHATSAPP: "agent.response.whatsapp",
   RESPONSE_CLI: "agent.response.cli",
+  
+  // Agent introspection
+  AGENT_INFO_RESPONSE: "agent.info.response",
 } as const;
 
 // ============================================================================

@@ -8,7 +8,7 @@
  * 2. **Mesh-hosted mode**: mesh-bridge runs as STDIO MCP, gets token from MESH_REQUEST_CONTEXT
  */
 
-import { config } from "../config.ts";
+import { config } from "../config";
 
 export interface MCPConnection {
   type: "HTTP";
@@ -192,6 +192,13 @@ export function getEventBusBindingId(): string | undefined {
 }
 
 /**
+ * Get the AGENT binding connection ID from state
+ */
+export function getAgentBindingId(): string | undefined {
+  return getBindingConnectionId("AGENT");
+}
+
+/**
  * Call a tool on a specific Mesh connection via the proxy API.
  * This allows STDIO MCPs to use bindings just like HTTP MCPs.
  */
@@ -200,6 +207,91 @@ const connectionNameCache = new Map<string, string>();
 
 export function cacheConnectionName(connectionId: string, name: string): void {
   connectionNameCache.set(connectionId, name);
+}
+
+/**
+ * Call a tool on the self connection (management API) via /mcp endpoint
+ */
+export async function callSelfTool<T = unknown>(
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<T> {
+  const token = getAuthToken();
+  const meshUrl = getMeshUrl();
+
+  if (!token) {
+    throw new Error("Mesh not configured. Configure bindings in Mesh UI first.");
+  }
+
+  const endpoint = `${meshUrl}/mcp`; // Self connection uses /mcp (no connection ID)
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: Date.now(),
+      method: "tools/call",
+      params: {
+        name: toolName,
+        arguments: args,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Mesh API error (${response.status}): ${text}`);
+  }
+
+  const contentType = response.headers.get("Content-Type") || "";
+  let json: {
+    result?: {
+      structuredContent?: T;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    error?: { message: string };
+  };
+
+  if (contentType.includes("text/event-stream")) {
+    const text = await response.text();
+    const lines = text.split("\n");
+    const dataLines = lines.filter((line) => line.startsWith("data: "));
+    const lastData = dataLines[dataLines.length - 1];
+    if (!lastData) {
+      throw new Error("Empty SSE response from Mesh API");
+    }
+    json = JSON.parse(lastData.slice(6));
+  } else {
+    const text = await response.text();
+    json = JSON.parse(text);
+  }
+
+  if (json.error) {
+    throw new Error(`Mesh tool error: ${json.error.message}`);
+  }
+
+  if (json.result?.structuredContent) {
+    return json.result.structuredContent as T;
+  }
+
+  const content = json.result?.content;
+  if (content && content.length > 0) {
+    const textItem = content.find((c) => c.type === "text" || c.text);
+    if (textItem?.text) {
+      try {
+        return JSON.parse(textItem.text) as T;
+      } catch {
+        return { text: textItem.text } as T;
+      }
+    }
+  }
+
+  return null as T;
 }
 
 function formatArgsForLog(args: Record<string, unknown>): string {
